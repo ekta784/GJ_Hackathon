@@ -3,10 +3,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload
+from sqlalchemy import update
 import asyncio
 import datetime
 import logging
 import random
+import re
 
 from backend.core.config import settings
 from backend.core.database import get_db, engine, AsyncSessionLocal
@@ -20,7 +22,7 @@ from backend.core.websockets import manager
 from backend.core.kafka import publisher
 from backend.services.correlation import correlation_engine, haversine_km
 from backend.ai.pipeline import ai_pipeline, SIMULATED_CAMERAS
-from backend.ai.normaliser import normalize_plate
+from backend.ai.normaliser import normalize_plate, weighted_levenshtein
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("setu-backend")
@@ -156,7 +158,12 @@ async def startup():
     await publisher.start()
     await correlation_engine.start()
     
-    ambient_task = asyncio.create_task(ambient_ingest_loop())
+    import os
+    if os.getenv("ENABLE_AMBIENT_TRAFFIC", "false").lower() == "true":
+        ambient_task = asyncio.create_task(ambient_ingest_loop())
+        logger.info("Ambient CCTV stream processing started across Gujarat nodes...")
+    else:
+        logger.info("Ambient background traffic is OFF. Ready for explicit live webcam / video / simulation events.")
     logger.info("SETU Sentinel Platform ready.")
 
 @app.on_event("shutdown")
@@ -381,12 +388,26 @@ async def delete_watchlist(watchlist_id: int, db: AsyncSession = Depends(get_db)
     if not item:
         raise HTTPException(status_code=404, detail="Watchlist item not found")
     plate = item.plate_number
+    
+    # 1. Nullify foreign key references in alerts so delete never violates constraints
+    await db.execute(
+        update(Alert).where(Alert.watchlist_id == watchlist_id).values(watchlist_id=None)
+    )
+
+    # 2. Delete the item
     await db.delete(item)
     db.add(AuditLog(
         action="WATCHLIST_REMOVE",
         details=f"Target {plate} removed from watchlist."
     ))
     await db.commit()
+
+    # 3. Broadcast real-time update to all connected frontends
+    await manager.broadcast_alert({
+        "type": "watchlist_updated",
+        "deleted_id": watchlist_id
+    })
+
     return {"message": "Deleted successfully", "id": watchlist_id}
 
 @app.get("/api/search/{plate_number}", response_model=list[SightingResponse])
@@ -400,6 +421,7 @@ async def search_plate(plate_number: str, db: AsyncSession = Depends(get_db)):
     ))
     await db.commit()
 
+    # 1. Fetch exact matches
     result = await db.execute(
         select(Sighting)
         .options(
@@ -409,7 +431,31 @@ async def search_plate(plate_number: str, db: AsyncSession = Depends(get_db)):
         .where(Sighting.plate_number == norm_search)
         .order_by(Sighting.timestamp.asc())
     )
-    sightings = result.scalars().all()
+    exact_sightings = list(result.scalars().all())
+
+    # 2. Fetch fuzzy OCR matches (e.g. MH12AB3156 vs MH12AB3456)
+    prefix = norm_search[:4] if len(norm_search) >= 4 else norm_search
+    fuzzy_res = await db.execute(
+        select(Sighting)
+        .options(
+            selectinload(Sighting.camera).selectinload(Camera.department),
+            selectinload(Sighting.camera).selectinload(Camera.vendor)
+        )
+        .where(Sighting.plate_number.like(f"{prefix}%"))
+        .order_by(Sighting.timestamp.asc())
+    )
+    candidate_sightings = fuzzy_res.scalars().all()
+
+    seen_ids = set(s.id for s in exact_sightings)
+    all_matched = list(exact_sightings)
+    for s in candidate_sightings:
+        if s.id not in seen_ids:
+            if weighted_levenshtein(s.plate_number, norm_search) <= 1.2:
+                all_matched.append(s)
+                seen_ids.add(s.id)
+
+    all_matched.sort(key=lambda s: s.timestamp)
+    sightings = all_matched
     
     response_data = []
     prev_s = None
@@ -492,13 +538,46 @@ async def get_alerts(db: AsyncSession = Depends(get_db)):
 
 @app.post("/api/simulate/sighting")
 async def simulate_single_sighting(req: SimulateSightingRequest):
-    """Allows manual injection of a vehicle sighting at a specific camera."""
+    """Allows manual injection of a vehicle sighting at a specific camera with optional auto-watchlist enrollment."""
     norm = normalize_plate(req.plate_number)
+    
+    # Auto-enroll in Watchlist only for clean standard Indian plates AND if no close match already exists
+    if req.auto_watchlist:
+        clean_pattern = re.compile(r'^[A-Z]{2}[0-9]{1,2}[A-Z]{1,3}[0-9]{4}$')
+        if clean_pattern.match(norm) and 8 <= len(norm) <= 11:
+            async with AsyncSessionLocal() as db:
+                wl_res = await db.execute(select(Watchlist))
+                all_wl = wl_res.scalars().all()
+                already_exists = False
+                for existing in all_wl:
+                    ex_norm = normalize_plate(existing.plate_number)
+                    if ex_norm == norm or weighted_levenshtein(ex_norm, norm) <= 1.2:
+                        already_exists = True
+                        break
+
+                if not already_exists:
+                    new_wl = Watchlist(
+                        plate_number=norm,
+                        reason=f"Live Physical Edge Detection at {req.camera_name}",
+                        severity="CRITICAL"
+                    )
+                    db.add(new_wl)
+                    await db.commit()
+                    logger.info(f"[+] Auto-enrolled clean plate {norm} into Watchlist.")
+                    await manager.broadcast_alert({
+                        "type": "watchlist_updated",
+                        "plate_number": norm
+                    })
+
     detection = await ai_pipeline.process_frame(req.camera_name, b"manual", forced_plate=norm)
     if req.latitude and req.longitude and detection:
         detection["latitude"] = req.latitude
         detection["longitude"] = req.longitude
     if detection:
+        if req.confidence:
+            detection["confidence_score"] = req.confidence
+        if req.timestamp:
+            detection["timestamp"] = req.timestamp
         await publisher.publish_sighting(detection)
         return {"status": "dispatched", "detection": detection}
     return {"status": "failed"}

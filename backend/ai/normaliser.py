@@ -35,6 +35,24 @@ VALID_STATES = [
     "DN", "DD", "DL", "JK", "LA", "LD", "PY"
 ]
 
+STATE_CONFUSIONS = {
+    "HH": "MH",
+    "NN": "MH",
+    "NH": "MH",
+    "HN": "MH",
+    "GH": "GJ",
+    "CJ": "GJ",
+    "G3": "GJ",
+    "BJ": "GJ",
+    "P8": "PB",
+    "FB": "PB",
+    "0L": "DL",
+    "OL": "DL",
+    "DI": "DL",
+    "K4": "KA",
+    "R3": "RJ"
+}
+
 def correct_char(c: str, expected_type: str) -> str:
     """Corrects character based on expected type ('alpha' or 'digit')."""
     if expected_type == 'alpha':
@@ -63,8 +81,14 @@ def normalize_plate(plate_text: str) -> str:
     
     state_code = "".join(normalized[0:2])
     if state_code not in VALID_STATES:
-        # We could try to do Levenshtein distance to closest state, but keep it simple for now
-        pass
+        if state_code in STATE_CONFUSIONS:
+            normalized[0:2] = list(STATE_CONFUSIONS[state_code])
+        elif state_code[1] == 'H' and state_code[0] in ['H', 'N', 'W']:
+            normalized[0:2] = ['M', 'H']
+        elif state_code[0] == 'G' and state_code[1] in ['3', 'H', 'I', '1']:
+            normalized[0:2] = ['G', 'J']
+        elif state_code[1] == 'L' and state_code[0] in ['0', 'O', 'D']:
+            normalized[0:2] = ['D', 'L']
     
     # 2. Last 4 characters must be DIGITS (Number)
     for i in range(len(normalized)-4, len(normalized)):

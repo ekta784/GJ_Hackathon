@@ -127,6 +127,11 @@ export default function App() {
   const [adapterCount, setAdapterCount] = useState(5);
   const [adapterSuccessMsg, setAdapterSuccessMsg] = useState('');
 
+  // Custom Vehicle Sighting & Pursuit Simulation State
+  const [customPlateInput, setCustomPlateInput] = useState('GJ03XX5555');
+  const [customCameraInput, setCustomCameraInput] = useState('SG Highway - ISKCON Cross Rd');
+  const [customSimMsg, setCustomSimMsg] = useState('');
+
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const mapInstanceRef = useRef<any>(null);
   const markersRef = useRef<any[]>([]);
@@ -190,9 +195,9 @@ export default function App() {
     ws.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
-        if (data.type === 'watchlist_hit' || data.type === 'impossible_travel') {
-          setLiveAlerts(prev => [data, ...prev].slice(0, 15));
-        } else if (data.type === 'adapter_registered') {
+        if (data.type === 'watchlist_hit' || data.type === 'impossible_travel' || data.type === 'live_sighting') {
+          setLiveAlerts(prev => [data, ...prev].slice(0, 20));
+        } else if (data.type === 'adapter_registered' || data.type === 'watchlist_updated') {
           fetchAllData();
         }
       } catch (err) {
@@ -205,9 +210,122 @@ export default function App() {
     };
   }, []);
 
-  // 2. Initialize MapLibre GL Map
+  // Helper: Draw Route, Surrounding Cameras, and Waypoints on any active map
+  const updateRouteOnMap = (map: any, results: Sighting[]) => {
+    if (!map || !window.maplibregl) return;
+
+    // Clear previous route markers
+    markersRef.current.forEach(m => m.remove());
+    markersRef.current = [];
+
+    if (map.getLayer('route-line-layer')) {
+      map.removeLayer('route-line-layer');
+    }
+    if (map.getSource('route-line-source')) {
+      map.removeSource('route-line-source');
+    }
+
+    // Always keep surrounding CCTV network nodes visible
+    plotCameraMarkers();
+
+    if (!results || results.length === 0) return;
+
+    const coordinates = results.map(s => [s.longitude, s.latitude]);
+
+    map.addSource('route-line-source', {
+      type: 'geojson',
+      data: {
+        type: 'Feature',
+        properties: {},
+        geometry: {
+          type: 'LineString',
+          coordinates: coordinates
+        }
+      }
+    });
+
+    map.addLayer({
+      id: 'route-line-layer',
+      type: 'line',
+      source: 'route-line-source',
+      layout: {
+        'line-join': 'round',
+        'line-cap': 'round'
+      },
+      paint: {
+        'line-color': '#00f0ff',
+        'line-width': 5,
+        'line-dasharray': [2, 1]
+      }
+    });
+
+    const totalStops = results.length;
+
+    results.forEach((sighting, idx) => {
+      const isLatest = (idx === totalStops - 1);
+      const isImplausible = sighting.transit_plausibility?.includes('IMPLAUSIBLE');
+
+      const el = document.createElement('div');
+      el.className = isLatest ? 'sighting-waypoint latest-radar-beacon' : 'sighting-waypoint';
+      
+      if (isLatest) {
+        el.style.backgroundColor = isImplausible ? '#ef4444' : '#10b981';
+        el.style.borderColor = '#ffffff';
+        el.style.boxShadow = isImplausible ? '0 0 25px #ef4444' : '0 0 25px #10b981';
+        el.innerHTML = `<span>🎯 #${idx + 1} CURRENT</span>`;
+      } else {
+        if (isImplausible) {
+          el.style.backgroundColor = '#ef4444';
+          el.style.boxShadow = '0 0 15px rgba(239, 68, 68, 0.9)';
+        }
+        el.innerHTML = `<span>#${idx + 1}</span>`;
+      }
+
+      const marker = new window.maplibregl.Marker({ element: el })
+        .setLngLat([sighting.longitude, sighting.latitude])
+        .setPopup(
+          new window.maplibregl.Popup({ offset: 25 })
+            .setHTML(`
+              <div class="map-popup">
+                <span class="badge-step" style="${isLatest ? 'background:#10b981; color:#fff;' : ''}">
+                  ${isLatest ? '🎯 CURRENT ACTIVE LOCATION' : `STOP #${idx + 1}`}
+                </span>
+                <h4 style="margin: 4px 0;">${sighting.plate_number}</h4>
+                <p><strong>Camera:</strong> ${sighting.camera_name}</p>
+                <p><strong>Dept:</strong> ${sighting.department_name || 'Police'}</p>
+                <p><strong>Time:</strong> ${new Date(sighting.timestamp).toLocaleTimeString()}</p>
+                <p><strong>Speed:</strong> ${sighting.transit_speed_kmh ? `${sighting.transit_speed_kmh} km/h` : 'First Sighting'}</p>
+                <p><strong>Status:</strong> ${sighting.transit_plausibility || 'PLAUSIBLE'}</p>
+              </div>
+            `)
+        )
+        .addTo(map);
+
+      markersRef.current.push(marker);
+    });
+
+    if (coordinates.length > 0) {
+      const uniqueLats = new Set(coordinates.map(c => c[1]));
+      const uniqueLons = new Set(coordinates.map(c => c[0]));
+      
+      if (uniqueLats.size === 1 && uniqueLons.size === 1) {
+        // If all sightings are at the same camera, frame the city so surrounding nodes are visible
+        map.flyTo({ center: coordinates[0], zoom: 13.5 });
+      } else {
+        const bounds = coordinates.reduce((b: any, coord: any) => b.extend(coord), new window.maplibregl.LngLatBounds(coordinates[0], coordinates[0]));
+        map.fitBounds(bounds, { padding: 75, maxZoom: 13 });
+      }
+    }
+  };
+
+  // 2. Initialize MapLibre GL Map whenever the tab or map container changes
   useEffect(() => {
-    if (!mapContainerRef.current || mapInstanceRef.current) return;
+    if (!mapContainerRef.current) return;
+
+    if (mapInstanceRef.current) {
+      mapInstanceRef.current.remove();
+      mapInstanceRef.current = null;
+    }
 
     if (window.maplibregl) {
       const map = new window.maplibregl.Map({
@@ -241,8 +359,17 @@ export default function App() {
 
       map.on('load', () => {
         plotCameraMarkers();
+        updateRouteOnMap(map, searchResults);
+        map.resize();
       });
     }
+
+    return () => {
+      if (mapInstanceRef.current) {
+        mapInstanceRef.current.remove();
+        mapInstanceRef.current = null;
+      }
+    };
   }, [activeTab]);
 
   // Helper for department color
@@ -305,85 +432,10 @@ export default function App() {
     }
   }, [cameras, selectedDeptFilter]);
 
-  // 4. Update Map Route Polyline & Sighting Pins
+  // 4. Update Map Route Polyline & Sighting Pins whenever searchResults changes
   useEffect(() => {
-    const map = mapInstanceRef.current;
-    if (!map || !window.maplibregl) return;
-
-    markersRef.current.forEach(m => m.remove());
-    markersRef.current = [];
-
-    if (map.getLayer('route-line-layer')) {
-      map.removeLayer('route-line-layer');
-    }
-    if (map.getSource('route-line-source')) {
-      map.removeSource('route-line-source');
-    }
-
-    if (searchResults.length === 0) return;
-
-    const coordinates = searchResults.map(s => [s.longitude, s.latitude]);
-
-    map.addSource('route-line-source', {
-      type: 'geojson',
-      data: {
-        type: 'Feature',
-        properties: {},
-        geometry: {
-          type: 'LineString',
-          coordinates: coordinates
-        }
-      }
-    });
-
-    map.addLayer({
-      id: 'route-line-layer',
-      type: 'line',
-      source: 'route-line-source',
-      layout: {
-        'line-join': 'round',
-        'line-cap': 'round'
-      },
-      paint: {
-        'line-color': '#00f0ff',
-        'line-width': 4,
-        'line-dasharray': [2, 1]
-      }
-    });
-
-    searchResults.forEach((sighting, idx) => {
-      const el = document.createElement('div');
-      el.className = 'sighting-waypoint';
-      const isImplausible = sighting.transit_plausibility?.includes('IMPLAUSIBLE');
-      if (isImplausible) {
-        el.style.backgroundColor = '#ef4444';
-        el.style.boxShadow = '0 0 15px rgba(239, 68, 68, 0.9)';
-      }
-      el.innerHTML = `<span>#${idx + 1}</span>`;
-
-      const marker = new window.maplibregl.Marker({ element: el })
-        .setLngLat([sighting.longitude, sighting.latitude])
-        .setPopup(
-          new window.maplibregl.Popup({ offset: 25 })
-            .setHTML(`
-              <div class="map-popup">
-                <span class="badge-step">STOP #${idx + 1}</span>
-                <h4 style="margin: 4px 0;">${sighting.plate_number}</h4>
-                <p><strong>Camera:</strong> ${sighting.camera_name}</p>
-                <p><strong>Dept:</strong> ${sighting.department_name || 'Police'}</p>
-                <p><strong>Time:</strong> ${new Date(sighting.timestamp).toLocaleTimeString()}</p>
-                <p><strong>Speed:</strong> ${sighting.transit_speed_kmh ? `${sighting.transit_speed_kmh} km/h` : 'First Sighting'}</p>
-              </div>
-            `)
-        )
-        .addTo(map);
-
-      markersRef.current.push(marker);
-    });
-
-    if (coordinates.length > 0) {
-      const bounds = coordinates.reduce((b: any, coord: any) => b.extend(coord), new window.maplibregl.LngLatBounds(coordinates[0], coordinates[0]));
-      map.fitBounds(bounds, { padding: 60, maxZoom: 12 });
+    if (mapInstanceRef.current) {
+      updateRouteOnMap(mapInstanceRef.current, searchResults);
     }
   }, [searchResults]);
 
@@ -480,7 +532,8 @@ export default function App() {
     fetch(`http://127.0.0.1:8000/api/watchlist/${id}`, {
       method: 'DELETE'
     })
-      .then(() => {
+      .then(res => {
+        if (!res.ok) throw new Error("Delete failed");
         setWatchlist(prev => prev.filter(w => w.id !== id));
         fetch('http://127.0.0.1:8000/api/audit').then(r => r.json()).then(a => setAuditLogs(a));
       })
@@ -508,6 +561,68 @@ export default function App() {
         setTimeout(() => setAdapterSuccessMsg(''), 5000);
       })
       .catch(err => console.error("Adapter registration failed", err));
+  };
+
+  // Custom Vehicle Sighting & Highway Route Simulation Handlers
+  const handleSimulateCustomPlate = async () => {
+    if (!customPlateInput) return;
+    setIsSimulating(true);
+    setCustomSimMsg(`Dispatching sighting for ${customPlateInput} to ${customCameraInput}...`);
+    try {
+      await fetch('http://127.0.0.1:8000/api/simulate/sighting', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          camera_name: customCameraInput,
+          plate_number: customPlateInput
+        })
+      });
+      setCustomSimMsg(`✅ Live sighting logged for ${customPlateInput} at ${customCameraInput}!`);
+      setTimeout(() => setCustomSimMsg(''), 4500);
+      setSearchQuery(customPlateInput);
+    } catch (err) {
+      console.error("Failed to inject sighting", err);
+      setCustomSimMsg('❌ Sighting dispatch failed');
+    } finally {
+      setIsSimulating(false);
+    }
+  };
+
+  const handleSimulateCustomRoute = async () => {
+    if (!customPlateInput) return;
+    setIsSimulating(true);
+    setCustomSimMsg(`Simulating 3-point pursuit across Gujarat for ${customPlateInput}...`);
+    const route = [
+      { cam: "SG Highway - ISKCON Cross Rd", lat: 23.0298, lon: 72.5074 },
+      { cam: "Gandhinagar CH-0 Circle", lat: 23.2156, lon: 72.6369 },
+      { cam: "Vadodara Express Highway Exit", lat: 22.3107, lon: 73.1812 }
+    ];
+    for (let i = 0; i < route.length; i++) {
+      const step = route[i];
+      try {
+        await fetch('http://127.0.0.1:8000/api/simulate/sighting', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            camera_name: step.cam,
+            plate_number: customPlateInput,
+            latitude: step.lat,
+            longitude: step.lon
+          })
+        });
+      } catch (e) {
+        console.error(e);
+      }
+      await new Promise(r => setTimeout(r, 350));
+    }
+    setCustomSimMsg(`✅ Route simulated across 3 cameras! Opening GIS Vehicle Investigation...`);
+    setSearchQuery(customPlateInput);
+    await performSearch(customPlateInput);
+    setTimeout(() => {
+      setActiveTab('investigation');
+      setIsSimulating(false);
+      setCustomSimMsg('');
+    }, 700);
   };
 
   // Fuzzy Playground calculation
@@ -565,9 +680,13 @@ export default function App() {
 
         {/* Header Action Controls */}
         <div className="header-actions">
-          <div className="stream-status-pill">
+          <div className="stream-status-pill" title="SETU Federated Ingestion Spine Active">
             <div className="stream-pulse"></div>
-            {wsConnected ? 'INGEST LIVE (5 FPS)' : 'OFFLINE'}
+            SPINE ONLINE
+          </div>
+          <div className="stream-status-pill" title="Live WebSocket Event Stream">
+            <div className="stream-pulse"></div>
+            {wsConnected ? 'WS CONNECTED' : 'WS CONNECTING...'}
           </div>
 
           <button 
@@ -647,6 +766,76 @@ export default function App() {
               </div>
             </div>
 
+            {/* Custom Target Vehicle Live Simulation Tool */}
+            <div className="glass-panel" style={{ padding: '0.9rem 1.2rem', marginBottom: '1.2rem', border: '1px solid rgba(0, 240, 255, 0.35)', background: 'linear-gradient(90deg, rgba(15, 23, 42, 0.85), rgba(8, 47, 73, 0.4))' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.6rem', flexWrap: 'wrap', gap: '0.5rem' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
+                  <span style={{ fontSize: '1.1rem' }}>🎯</span>
+                  <div>
+                    <strong style={{ color: 'var(--accent-cyan)', fontSize: '0.95rem' }}>Custom Vehicle Sighting & Highway Pursuit Simulator</strong>
+                    <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginLeft: '0.8rem' }}>Test ANY vehicle plate instantly across Gujarat edge cameras</span>
+                  </div>
+                </div>
+                {customSimMsg && (
+                  <span style={{ fontSize: '0.82rem', color: '#10b981', fontWeight: 600 }}>{customSimMsg}</span>
+                )}
+              </div>
+              <div style={{ display: 'flex', gap: '0.8rem', alignItems: 'center', flexWrap: 'wrap' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                  <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Plate:</span>
+                  <input
+                    type="text"
+                    className="input-police"
+                    style={{ width: '150px', padding: '0.4rem 0.6rem', fontSize: '0.88rem' }}
+                    value={customPlateInput}
+                    onChange={(e) => setCustomPlateInput(e.target.value.toUpperCase())}
+                    placeholder="e.g. GJ03XX5555"
+                  />
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                  <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Camera:</span>
+                  <select
+                    className="select-police"
+                    style={{ minWidth: '220px', padding: '0.4rem 0.6rem', fontSize: '0.85rem' }}
+                    value={customCameraInput}
+                    onChange={(e) => setCustomCameraInput(e.target.value)}
+                  >
+                    {cameras.map(c => (
+                      <option key={c.id} value={c.name}>{c.name} ({c.department})</option>
+                    ))}
+                  </select>
+                </div>
+                <button
+                  className="btn-trace-quick"
+                  style={{ padding: '0.45rem 0.9rem', fontSize: '0.85rem', background: 'rgba(0, 240, 255, 0.15)', borderColor: 'var(--accent-cyan)' }}
+                  onClick={handleSimulateCustomPlate}
+                  disabled={isSimulating}
+                >
+                  ⚡ Inject Single Sighting
+                </button>
+                <button
+                  className="btn-official-test"
+                  style={{ padding: '0.45rem 0.9rem', fontSize: '0.85rem' }}
+                  onClick={handleSimulateCustomRoute}
+                  disabled={isSimulating}
+                >
+                  🛣️ Simulate 3-Camera Route & Trace
+                </button>
+                <button
+                  className="btn-trace-quick"
+                  style={{ padding: '0.45rem 0.8rem', fontSize: '0.8rem', borderColor: '#f97316', color: '#f97316' }}
+                  onClick={() => {
+                    setNewPlate(customPlateInput);
+                    setNewReason(`Wanted suspect vehicle ${customPlateInput} - State SCRB FIR`);
+                    setActiveTab('watchlist');
+                  }}
+                  title="Add this plate to unified watchlist for red alert notifications"
+                >
+                  + Add to Watchlist
+                </button>
+              </div>
+            </div>
+
             {/* Split View: Live Map & Alert Feed */}
             <div className="split-view" style={{ height: 'calc(100vh - 430px)' }}>
               <div className="glass-panel map-view-panel">
@@ -677,12 +866,22 @@ export default function App() {
                       <p>Monitoring ambient traffic across Gujarat nodes...</p>
                     </div>
                   ) : (
-                    liveAlerts.slice(0, 6).map((alert, idx) => (
-                      <div key={idx} className={`alert-card-live ${alert.type === 'impossible_travel' ? 'danger-flash' : 'warning-pulse'}`}>
+                    liveAlerts.slice(0, 8).map((alert, idx) => (
+                      <div key={idx} className={`alert-card-live ${
+                        alert.type === 'impossible_travel' 
+                          ? 'danger-flash' 
+                          : alert.type === 'watchlist_hit' 
+                          ? 'warning-pulse' 
+                          : 'success-glow'
+                      }`}>
                         <div className="alert-text-body">
                           <div className="alert-badge-row">
-                            <span className="alert-type-badge">
-                              {alert.type === 'impossible_travel' ? '⚠️ CLONED PLATE' : '🚨 WATCHLIST HIT'}
+                            <span className="alert-type-badge" style={{
+                              background: alert.type === 'impossible_travel' ? '#ef4444' : alert.type === 'watchlist_hit' ? '#f59e0b' : '#10b981',
+                              color: '#fff',
+                              fontWeight: 700
+                            }}>
+                              {alert.type === 'impossible_travel' ? '⚠️ CLONED PLATE' : alert.type === 'watchlist_hit' ? '🚨 WATCHLIST HIT' : '🟢 LIVE DETECTION'}
                             </span>
                             <span className="alert-plate">{alert.plate_number}</span>
                             {alert.department && (
@@ -692,16 +891,39 @@ export default function App() {
                           <div className="alert-detail-line">
                             {alert.type === 'impossible_travel' 
                               ? `Anomaly: ${alert.distance_km || 209} km in ${alert.time_diff_seconds || 0.8}s (~${alert.speed_kmh || 916000} km/h)`
-                              : alert.reason || 'Wanted Vehicle match'}
+                              : alert.reason || `Edge camera detection at ${alert.camera || 'Gujarat Node'} (Confidence: ${Math.round((alert.confidence || 0.96) * 100)}%)`}
                           </div>
-                          <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '0.4rem', fontSize: '0.72rem', color: 'var(--text-muted)' }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '0.4rem', fontSize: '0.72rem', color: 'var(--text-muted)' }}>
                             <span>📍 {alert.camera || 'Gujarat Node'}</span>
-                            <button 
-                              className="btn-trace-quick" 
-                              onClick={() => { setSearchQuery(alert.plate_number); performSearch(alert.plate_number); setActiveTab('investigation'); }}
-                            >
-                              Investigate
-                            </button>
+                            <div style={{ display: 'flex', gap: '0.35rem' }}>
+                              <button 
+                                className="btn-trace-quick" 
+                                onClick={() => { setSearchQuery(alert.plate_number); performSearch(alert.plate_number); setActiveTab('investigation'); }}
+                                title="Trace route on GIS map"
+                              >
+                                Investigate
+                              </button>
+                              {alert.type === 'live_sighting' && (
+                                <button 
+                                  className="btn-trace-quick"
+                                  style={{ borderColor: '#f59e0b', color: '#f59e0b' }}
+                                  onClick={() => {
+                                    fetch('http://127.0.0.1:8000/api/watchlist', {
+                                      method: 'POST',
+                                      headers: { 'Content-Type': 'application/json' },
+                                      body: JSON.stringify({
+                                        plate_number: alert.plate_number,
+                                        reason: `Live Camera Target - ${alert.camera}`,
+                                        severity: 'CRITICAL'
+                                      })
+                                    }).then(() => fetchAllData());
+                                  }}
+                                  title="Add to Watchlist"
+                                >
+                                  + Watchlist
+                                </button>
+                              )}
+                            </div>
                           </div>
                         </div>
                       </div>
@@ -833,17 +1055,20 @@ export default function App() {
                       style={{ cursor: 'pointer', border: expandedAlertIndex === idx ? '2px solid var(--accent-cyan)' : undefined }}
                       onClick={() => setExpandedAlertIndex(idx)}
                     >
-                      <span className="alert-icon-box">{alert.type === 'impossible_travel' ? '⚡' : '🚨'}</span>
+                      <span className="alert-icon-box">{alert.type === 'impossible_travel' ? '⚡' : alert.type === 'watchlist_hit' ? '🚨' : '🟢'}</span>
                       <div className="alert-text-body">
                         <div className="alert-badge-row">
-                          <span className="alert-type-badge">
-                            {alert.type === 'impossible_travel' ? 'IMPOSSIBLE TRAVEL / CLONED' : 'ANPR WATCHLIST HIT'}
+                          <span className="alert-type-badge" style={{
+                            background: alert.type === 'impossible_travel' ? '#ef4444' : alert.type === 'watchlist_hit' ? '#f59e0b' : '#10b981',
+                            color: '#fff'
+                          }}>
+                            {alert.type === 'impossible_travel' ? 'IMPOSSIBLE TRAVEL / CLONED' : alert.type === 'watchlist_hit' ? 'ANPR WATCHLIST HIT' : 'EDGE LIVE DETECTION'}
                           </span>
                           <span className="alert-plate">{alert.plate_number}</span>
                           {alert.department && (
                             <span className={`badge-dept ${getDeptBadgeClass(alert.department)}`}>{alert.department}</span>
                           )}
-                          <span className="fuzzy-badge">{alert.alert_level || 'CONFIRMED'}</span>
+                          <span className="fuzzy-badge">{alert.alert_level || (alert.type === 'live_sighting' ? 'LIVE OCR' : 'CONFIRMED')}</span>
                         </div>
                         <div className="alert-detail-line">{alert.reason || 'Suspect vehicle detected.'}</div>
                         <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.3rem' }}>

@@ -184,6 +184,13 @@ body {
   animation: pulseGlow 1.5s infinite alternate;
 }
 
+.alert-card-live.success-glow {
+  background: rgba(16, 185, 129, 0.15);
+  border: 1px solid rgba(16, 185, 129, 0.5);
+  border-left: 5px solid #10b981;
+  box-shadow: 0 0 14px rgba(16, 185, 129, 0.25);
+}
+
 @keyframes pulseGlow {
   from { box-shadow: 0 0 10px rgba(239, 68, 68, 0.3); }
   to { box-shadow: 0 0 22px rgba(239, 68, 68, 0.6); }
@@ -1312,4 +1319,70 @@ body {
   background: rgba(0, 240, 255, 0.15);
   border-color: var(--accent-cyan);
   color: var(--accent-cyan);
+}
+
+/* Map Waypoint Markers & Live Radar Beacon */
+.sighting-waypoint {
+  background-color: #00f0ff;
+  color: #030712;
+  font-weight: 800;
+  font-size: 0.72rem;
+  padding: 4px 8px;
+  border-radius: 20px;
+  border: 2px solid #ffffff;
+  box-shadow: 0 0 12px rgba(0, 240, 255, 0.8);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: transform 0.2s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.sighting-waypoint:hover {
+  transform: scale(1.15);
+}
+
+.latest-radar-beacon {
+  background-color: #10b981 !important;
+  color: #ffffff !important;
+  font-weight: 900 !important;
+  font-size: 0.78rem !important;
+  padding: 6px 12px !important;
+  border: 2px solid #ffffff !important;
+  box-shadow: 0 0 25px #10b981, 0 0 50px rgba(16, 185, 129, 0.5) !important;
+  animation: radar-pulse-anim 1.8s infinite ease-out;
+  z-index: 999 !important;
+}
+
+@keyframes radar-pulse-anim {
+  0% {
+    box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.8), 0 0 15px #10b981;
+  }
+  70% {
+    box-shadow: 0 0 0 20px rgba(16, 185, 129, 0), 0 0 25px #10b981;
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(16, 185, 129, 0), 0 0 15px #10b981;
+  }
+}
+
+.camera-marker-pin {
+  background: rgba(15, 23, 42, 0.9);
+  border: 2px solid #3b82f6;
+  border-radius: 50%;
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.72rem;
+  box-shadow: 0 0 8px rgba(0, 0, 0, 0.6);
+  cursor: pointer;
+  transition: transform 0.2s;
+}
+
+.camera-marker-pin:hover {
+  transform: scale(1.25);
+  box-shadow: 0 0 14px rgba(0, 240, 255, 0.8);
 }

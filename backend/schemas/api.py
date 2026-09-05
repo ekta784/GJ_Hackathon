@@ -76,6 +76,9 @@ class SimulateSightingRequest(BaseModel):
     camera_name: str
     latitude: Optional[float] = None
     longitude: Optional[float] = None
+    confidence: Optional[float] = 0.96
+    auto_watchlist: Optional[bool] = True
+    timestamp: Optional[float] = None
 
 class DepartmentResponse(BaseModel):
     id: int

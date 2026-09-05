@@ -131,6 +131,7 @@ class CorrelationEngine:
             # 3. Check Watchlist with Fuzzy Weighted Levenshtein Matching
             watchlist_res = await db.execute(select(Watchlist))
             all_watchlist = watchlist_res.scalars().all()
+            alert_triggered = False
 
             for item in all_watchlist:
                 w_norm = normalize_plate(item.plate_number)
@@ -170,6 +171,7 @@ class CorrelationEngine:
                         "sha256": snapshot_hash
                     }
                     await manager.broadcast_alert(alert_payload)
+                    alert_triggered = True
                     logger.info(f"🚨 WATCHLIST HIT: {normalized_plate} (Watchlist: {item.plate_number}, Dist: {dist:.1f}) at {camera.name}")
                     break
 
@@ -218,6 +220,30 @@ class CorrelationEngine:
                             "time": timestamp.isoformat()
                         }
                         await manager.broadcast_alert(travel_payload)
+                        alert_triggered = True
                         logger.warning(f"⚠️ CLONED PLATE / IMPOSSIBLE TRAVEL: {normalized_plate} ({dist_km:.1f} km in {dt_seconds:.1f}s)")
+
+            # 5. Broadcast Ambient Live Detection if no alert triggered
+            if not alert_triggered:
+                live_payload = {
+                    "type": "live_sighting",
+                    "plate_number": normalized_plate,
+                    "raw_plate": raw_plate,
+                    "confidence": confidence_score,
+                    "breakdown": {
+                        "plate_det": round(plate_det_conf * 100, 1),
+                        "ocr_char": round(ocr_char_conf * 100, 1),
+                        "grammar_validity": round(format_validity * 100, 1),
+                        "composite": round(confidence_score * 100, 1)
+                    },
+                    "camera": camera.name,
+                    "location": {"lat": camera.latitude, "lng": camera.longitude},
+                    "time": timestamp.isoformat(),
+                    "reason": f"Real-Time Edge Detection at {camera.name}",
+                    "severity": "NORMAL",
+                    "sha256": snapshot_hash
+                }
+                await manager.broadcast_alert(live_payload)
+                logger.info(f"🟢 LIVE SIGHTING BROADCAST: {normalized_plate} at {camera.name}")
 
 correlation_engine = CorrelationEngine()

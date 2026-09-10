@@ -52,14 +52,17 @@ class CameraResponse(BaseModel):
     whep_url: Optional[str] = None
     latency_ms: Optional[int] = 24
     packet_loss: Optional[float] = 0.0
+    detection_count: Optional[int] = 0
+    last_detection: Optional[str] = None
 
     class Config:
         from_attributes = True
 
 class AlertResponse(BaseModel):
     id: int
-    sighting_id: int
+    sighting_id: Optional[int] = None
     watchlist_id: Optional[int] = None
+    incident_id: Optional[int] = None
     alert_type: str
     alert_level: str
     details: Optional[str] = None
@@ -71,14 +74,51 @@ class AlertResponse(BaseModel):
     class Config:
         from_attributes = True
 
-class SimulateSightingRequest(BaseModel):
+class IncidentResponse(BaseModel):
+    id: int
+    incident_number: str
+    camera_id: Optional[int] = None
+    camera_name: Optional[str] = "Unknown Camera"
+    department_name: Optional[str] = "Police"
+    district: Optional[str] = "Ahmedabad"
+    sighting_id: Optional[int] = None
     plate_number: str
+    event_type: str
+    severity: str
+    confidence: float
+    status: str
+    description: Optional[str] = None
+    snapshot_sha256: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+class IncidentStatusUpdate(BaseModel):
+    status: str
+    notes: Optional[str] = None
+
+class DashboardStatsResponse(BaseModel):
+    total_cameras: int
+    active_cameras: int
+    active_incidents: int
+    resolved_incidents: int
+    today_detections: int
+    critical_alerts: int
+    departments_count: int
+    watchlist_count: int
+
+class SimulateSightingRequest(BaseModel):
+    plate_number: Optional[str] = None
     camera_name: str
     latitude: Optional[float] = None
     longitude: Optional[float] = None
     confidence: Optional[float] = 0.96
     auto_watchlist: Optional[bool] = True
     timestamp: Optional[float] = None
+    event_type: Optional[str] = "WATCHLIST_HIT"
+    severity: Optional[str] = "CRITICAL"
 
 class DepartmentResponse(BaseModel):
     id: int
@@ -105,3 +145,4 @@ class AuditLogResponse(BaseModel):
 
     class Config:
         from_attributes = True
+

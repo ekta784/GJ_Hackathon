@@ -7,7 +7,7 @@ from sqlalchemy.future import select
 
 from backend.core.config import settings
 from backend.core.database import AsyncSessionLocal
-from backend.core.models import Sighting, Watchlist, Alert, Camera
+from backend.core.models import Sighting, Watchlist, Alert, Camera, Incident
 from backend.core.websockets import manager
 from backend.core.kafka import publisher
 from backend.ai.normaliser import normalize_plate, weighted_levenshtein
@@ -139,18 +139,43 @@ class CorrelationEngine:
 
                 if dist <= 1.2:
                     alert_level = "CONFIRMED" if dist == 0.0 else "PROBABLE"
+                    inc_num = f"INC-{datetime.datetime.utcnow().strftime('%Y%m%d')}-{random.randint(1000, 9999)}"
+                    incident = Incident(
+                        incident_number=inc_num,
+                        camera_id=camera.id,
+                        sighting_id=new_sighting.id,
+                        plate_number=normalized_plate,
+                        event_type="WATCHLIST_HIT",
+                        severity=item.severity or "CRITICAL",
+                        confidence=confidence_score,
+                        status="NEW",
+                        description=f"Matched watchlist item '{item.plate_number}' with distance {dist:.1f}. Reason: {item.reason}",
+                        snapshot_sha256=snapshot_hash,
+                        created_at=timestamp,
+                        updated_at=timestamp
+                    )
+                    db.add(incident)
+                    await db.commit()
+                    await db.refresh(incident)
+
                     alert_rec = Alert(
                         sighting_id=new_sighting.id,
                         watchlist_id=item.id,
+                        incident_id=incident.id,
                         alert_type="watchlist_hit",
                         alert_level=alert_level,
                         details=f"Matched watchlist item '{item.plate_number}' with distance {dist:.1f}. Reason: {item.reason}"
                     )
                     db.add(alert_rec)
                     await db.commit()
+                    await db.refresh(alert_rec)
 
                     alert_payload = {
                         "type": "watchlist_hit",
+                        "alert_id": alert_rec.id,
+                        "incident_id": incident.id,
+                        "incident_number": incident.incident_number,
+                        "status": "NEW",
                         "plate_number": normalized_plate,
                         "raw_plate": raw_plate,
                         "watchlist_plate": item.plate_number,
@@ -163,7 +188,9 @@ class CorrelationEngine:
                             "grammar_validity": round(format_validity * 100, 1),
                             "composite": round(confidence_score * 100, 1)
                         },
+                        "camera_id": camera.id,
                         "camera": camera.name,
+                        "department": camera.department.name if camera.department else "Police",
                         "location": {"lat": camera.latitude, "lng": camera.longitude},
                         "time": timestamp.isoformat(),
                         "reason": item.reason,
@@ -172,7 +199,7 @@ class CorrelationEngine:
                     }
                     await manager.broadcast_alert(alert_payload)
                     alert_triggered = True
-                    logger.info(f"🚨 WATCHLIST HIT: {normalized_plate} (Watchlist: {item.plate_number}, Dist: {dist:.1f}) at {camera.name}")
+                    logger.info(f"🚨 WATCHLIST HIT: {normalized_plate} (Watchlist: {item.plate_number}, Dist: {dist:.1f}) at {camera.name} -> {inc_num}")
                     break
 
             # 4. Topology-Aware Physics Check: Cloned Plates / Impossible Travel
@@ -198,30 +225,58 @@ class CorrelationEngine:
                     speed_kmh = (dist_km / (dt_seconds / 3600.0)) if dt_seconds > 0 else 9999.0
                     
                     if speed_kmh > 160.0 or (dt_seconds < 15.0 and dist_km > 0.5):
+                        inc_num = f"INC-{datetime.datetime.utcnow().strftime('%Y%m%d')}-{random.randint(1000, 9999)}"
+                        incident = Incident(
+                            incident_number=inc_num,
+                            camera_id=camera.id,
+                            sighting_id=new_sighting.id,
+                            plate_number=normalized_plate,
+                            event_type="CLONED_PLATE",
+                            severity="CRITICAL",
+                            confidence=0.99,
+                            status="NEW",
+                            description=f"Cloned plate anomaly: traveled {dist_km:.1f} km in {dt_seconds:.1f}s (~{speed_kmh:.0f} km/h) between {last_cam.name} and {camera.name}",
+                            snapshot_sha256=snapshot_hash,
+                            created_at=timestamp,
+                            updated_at=timestamp
+                        )
+                        db.add(incident)
+                        await db.commit()
+                        await db.refresh(incident)
+
                         alert_rec = Alert(
                             sighting_id=new_sighting.id,
+                            incident_id=incident.id,
                             alert_type="impossible_travel",
                             alert_level="CONFIRMED",
                             details=f"Cloned plate anomaly: traveled {dist_km:.1f} km in {dt_seconds:.1f}s (~{speed_kmh:.0f} km/h) between {last_cam.name} and {camera.name}"
                         )
                         db.add(alert_rec)
                         await db.commit()
+                        await db.refresh(alert_rec)
 
                         travel_payload = {
                             "type": "impossible_travel",
+                            "alert_id": alert_rec.id,
+                            "incident_id": incident.id,
+                            "incident_number": incident.incident_number,
+                            "status": "NEW",
                             "plate_number": normalized_plate,
                             "speed_kmh": round(speed_kmh, 1),
                             "distance_km": round(dist_km, 2),
                             "time_diff_seconds": round(dt_seconds, 1),
+                            "camera_id": camera.id,
                             "camera_a": last_cam.name,
                             "camera_b": camera.name,
+                            "department": camera.department.name if camera.department else "Police",
                             "location_a": {"lat": last_cam.latitude, "lng": last_cam.longitude},
                             "location_b": {"lat": camera.latitude, "lng": camera.longitude},
-                            "time": timestamp.isoformat()
+                            "time": timestamp.isoformat(),
+                            "severity": "CRITICAL"
                         }
                         await manager.broadcast_alert(travel_payload)
                         alert_triggered = True
-                        logger.warning(f"⚠️ CLONED PLATE / IMPOSSIBLE TRAVEL: {normalized_plate} ({dist_km:.1f} km in {dt_seconds:.1f}s)")
+                        logger.warning(f"⚠️ CLONED PLATE / IMPOSSIBLE TRAVEL: {normalized_plate} ({dist_km:.1f} km in {dt_seconds:.1f}s) -> {inc_num}")
 
             # 5. Broadcast Ambient Live Detection if no alert triggered
             if not alert_triggered:

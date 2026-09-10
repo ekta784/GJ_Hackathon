@@ -60,11 +60,32 @@ class Sighting(Base):
     camera_id = Column(Integer, ForeignKey('cameras.id'))
     camera = relationship("Camera", back_populates="sightings")
 
+class Incident(Base):
+    __tablename__ = 'incidents'
+    id = Column(Integer, primary_key=True, index=True)
+    incident_number = Column(String, unique=True, index=True)
+    camera_id = Column(Integer, ForeignKey('cameras.id'), nullable=True)
+    sighting_id = Column(Integer, ForeignKey('sightings.id'), nullable=True)
+    plate_number = Column(String, index=True)
+    event_type = Column(String, default="WATCHLIST_HIT")
+    severity = Column(String, default="CRITICAL")
+    confidence = Column(Float, default=0.96)
+    status = Column(String, default="NEW")  # NEW, UNDER_REVIEW, ACKNOWLEDGED, RESOLVED
+    description = Column(Text, nullable=True)
+    snapshot_sha256 = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
+
+    camera = relationship("Camera")
+    sighting = relationship("Sighting")
+    alerts = relationship("Alert", back_populates="incident")
+
 class Alert(Base):
     __tablename__ = 'alerts'
     id = Column(Integer, primary_key=True, index=True)
-    sighting_id = Column(Integer, ForeignKey('sightings.id'))
+    sighting_id = Column(Integer, ForeignKey('sightings.id'), nullable=True)
     watchlist_id = Column(Integer, ForeignKey('watchlist.id'), nullable=True)
+    incident_id = Column(Integer, ForeignKey('incidents.id'), nullable=True)
     alert_type = Column(String, default="watchlist_hit")
     alert_level = Column(String, default="CONFIRMED")
     details = Column(Text, nullable=True)
@@ -72,6 +93,7 @@ class Alert(Base):
     
     sighting = relationship("Sighting")
     watchlist = relationship("Watchlist")
+    incident = relationship("Incident", back_populates="alerts")
 
 class AuditLog(Base):
     __tablename__ = 'audit_log'
@@ -80,3 +102,4 @@ class AuditLog(Base):
     action = Column(String)
     details = Column(Text, nullable=True)
     timestamp = Column(DateTime, default=datetime.datetime.utcnow)
+

@@ -42,12 +42,11 @@ class MockAIPipeline:
     """
     def __init__(self):
         self.target_plates = [
-            "GJ01AB1234",  # Wanted test vehicle
-            "GJ01A81234",  # With OCR confusion: '8' instead of 'B'
-            "GJ05CD5678",  # Normal traffic
-            "MH04EF9012",
-            "GJ01XY9999",  # Target for impossible travel
-            "DL01AB4321"
+            "LS15EBC",     # Real vehicle: Mercedes-AMG Sports Coupe (Police & Health CCTV)
+            "DL3CBJ1384",  # Real vehicle: Silver Maruti Hatchback (AMC Riverfront Municipal CCTV)
+            "DL2CAT4762",  # Real vehicle: Silver Nissan Terrano SUV (Sanand Panchayat CCTV)
+            "HR26CQ6869",  # Real vehicle: Interstate Transit (GSRTC Bus Terminal CCTV)
+            "GJ01XY9999"   # Anomaly test vehicle
         ]
 
     async def process_frame(self, camera_id: str, frame_bytes: bytes, forced_plate: Optional[str] = None) -> Optional[Dict[str, Any]]:

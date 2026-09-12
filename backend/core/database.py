@@ -6,24 +6,34 @@ from backend.core.config import settings
 
 logger = logging.getLogger(__name__)
 
-DATABASE_URL = os.getenv("DATABASE_URL", settings.DATABASE_URL)
+import socket
 
-try:
-    if "postgresql" in DATABASE_URL:
-        import asyncpg  # Test if driver is present
-        connect_args = {}
-    else:
-        DATABASE_URL = "sqlite+aiosqlite:///./setu.db"
-        connect_args = {"check_same_thread": False}
-except (ImportError, ModuleNotFoundError):
-    logger.info("PostgreSQL asyncpg not installed. Falling back to local SQLite database.")
-    DATABASE_URL = "sqlite+aiosqlite:///./setu.db"
-    connect_args = {"check_same_thread": False}
+def resolve_postgres_url():
+    url = os.getenv("DATABASE_URL", settings.DATABASE_URL)
+    # Auto-resolve active PostgreSQL port between 5433 and 5432
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(0.4)
+            is_5433 = (s.connect_ex(("127.0.0.1", 5433)) == 0)
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(0.4)
+            is_5432 = (s.connect_ex(("127.0.0.1", 5432)) == 0)
+        
+        if is_5433 and not is_5432:
+            url = url.replace(":5432/", ":5433/")
+        elif is_5432 and not is_5433:
+            url = url.replace(":5433/", ":5432/")
+    except Exception:
+        pass
+    return url
+
+DATABASE_URL = resolve_postgres_url()
+logger.info(f"SETU Database Layer: Connected strictly to PostgreSQL ({DATABASE_URL.split('@')[-1]})")
 
 engine = create_async_engine(
     DATABASE_URL,
     echo=False,
-    connect_args=connect_args
+    connect_args={}
 )
 
 async_session = sessionmaker(

@@ -541,6 +541,125 @@ body {
   color: #94a3b8;
 }
 
+/* Waypoint Map Focus & Telemetry Box */
+.btn-locate-map {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: rgba(0, 240, 255, 0.12);
+  border: 1px solid rgba(0, 240, 255, 0.35);
+  color: var(--accent-cyan);
+  padding: 3px 9px;
+  border-radius: 4px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.btn-locate-map:hover {
+  background: rgba(0, 240, 255, 0.25);
+  border-color: var(--accent-cyan);
+  box-shadow: 0 0 12px rgba(0, 240, 255, 0.45);
+  transform: translateY(-1px);
+}
+
+.waypoint-telemetry-box {
+  background: rgba(10, 15, 29, 0.75);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 6px;
+  padding: 0.6rem 0.8rem;
+  margin: 0.4rem 0;
+  transition: border-color 0.2s ease;
+}
+
+.waypoint-telemetry-box:hover {
+  border-color: rgba(0, 240, 255, 0.3);
+}
+
+.telemetry-plate-strip {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.5rem;
+  padding-bottom: 0.4rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.hsrp-mini-plate {
+  display: inline-flex;
+  align-items: center;
+  background: #ffffff;
+  border: 1.5px solid #000000;
+  border-radius: 3px;
+  overflow: hidden;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.45);
+}
+
+.hsrp-blue-band {
+  background: #003399;
+  color: #ffffff;
+  padding: 1px 4px;
+  font-size: 0.55rem;
+  font-weight: 800;
+  letter-spacing: 0.5px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.hsrp-plate-code {
+  color: #111827;
+  font-family: 'JetBrains Mono', 'Consolas', monospace;
+  font-weight: 900;
+  font-size: 0.84rem;
+  letter-spacing: 1.2px;
+  padding: 1px 6px;
+}
+
+.telemetry-status-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 0.68rem;
+  font-weight: 700;
+  color: #10b981;
+  background: rgba(16, 185, 129, 0.12);
+  border: 1px solid rgba(16, 185, 129, 0.3);
+  padding: 2px 7px;
+  border-radius: 4px;
+}
+
+.telemetry-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.5rem;
+}
+
+.telemetry-item {
+  display: flex;
+  flex-direction: column;
+}
+
+.telemetry-label {
+  font-size: 0.66rem;
+  color: var(--text-muted);
+  margin-bottom: 2px;
+}
+
+.telemetry-val {
+  font-size: 0.76rem;
+  color: #e2e8f0;
+  font-family: 'JetBrains Mono', 'Consolas', monospace;
+  font-weight: 600;
+}
+
+.focused-waypoint-card {
+  border-left-color: #10b981 !important;
+  box-shadow: 0 0 22px rgba(0, 240, 255, 0.45) !important;
+  background: rgba(15, 23, 42, 0.92) !important;
+}
+
 /* Empty State */
 .empty-state-box {
   display: flex;
@@ -1413,7 +1532,30 @@ body {
 }
 
 .table-police tr:hover td {
-  background: rgba(255, 255, 255, 0.02);
+  background: rgba(56, 189, 248, 0.05);
+}
+
+.btn-decommission {
+  background: rgba(239, 68, 68, 0.15);
+  color: #fca5a5;
+  border: 1px solid rgba(239, 68, 68, 0.4);
+  padding: 0.32rem 0.7rem;
+  border-radius: 6px;
+  font-size: 0.76rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.18s ease;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.btn-decommission:hover {
+  background: rgba(239, 68, 68, 0.32);
+  color: #ffffff;
+  border-color: #ef4444;
+  box-shadow: 0 0 10px rgba(239, 68, 68, 0.4);
+  transform: translateY(-1px);
 }
 
 /* Quick Target Suggestions */
@@ -1487,6 +1629,13 @@ body {
 
 .sighting-waypoint:hover {
   transform: scale(1.15);
+}
+
+.focused-marker-top {
+  z-index: 99999 !important;
+  transform: scale(1.25) !important;
+  border-color: #ffffff !important;
+  box-shadow: 0 0 20px #00f0ff, 0 0 35px rgba(0, 240, 255, 0.8) !important;
 }
 
 .latest-radar-beacon {

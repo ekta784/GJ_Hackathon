@@ -4,7 +4,7 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload
-from sqlalchemy import update, func
+from sqlalchemy import update, func, delete
 from typing import Optional, List, Dict, Any
 import asyncio
 import datetime
@@ -12,6 +12,75 @@ import logging
 import random
 import re
 import os
+import cv2
+
+_yolo_detector = None
+def get_yolo_detector():
+    global _yolo_detector
+    if _yolo_detector is None:
+        try:
+            from ultralytics import YOLO
+            _yolo_detector = YOLO("yolov8n.pt")
+            logging.getLogger("setu-backend").info("[+] YOLOv8 vehicle detector ready in backend.")
+        except Exception as e:
+            logging.getLogger("setu-backend").warning(f"YOLOv8 note: {e}")
+    return _yolo_detector
+
+def detect_live_camera_vehicle(camera_name: str, dept_name: str):
+    """Runs real-time YOLOv8 vehicle detection directly on the camera's actual video frame."""
+    d_lower = (dept_name or "").lower()
+    c_lower = (camera_name or "").lower()
+    if "municipal" in d_lower or "riverfront" in c_lower or "amc" in c_lower:
+        video_file = "frontend/public/videos/municipal_cctv.mp4"
+        dept_key = "municipal"
+    elif "panchayat" in d_lower or "sanand" in c_lower or "bhuj" in c_lower:
+        video_file = "frontend/public/videos/panchayat_cctv.mp4"
+        dept_key = "panchayat"
+    elif "gsrtc" in d_lower or "bus" in c_lower or "terminal" in c_lower:
+        video_file = "frontend/public/videos/gsrtc_cctv.mp4"
+        dept_key = "gsrtc"
+    elif "health" in d_lower or "hospital" in c_lower or "trauma" in c_lower:
+        video_file = "frontend/public/videos/health_cctv.mp4"
+        dept_key = "health"
+    else:
+        video_file = "frontend/public/videos/police_cctv.mp4"
+        dept_key = "police"
+
+    profile = CAMERA_REAL_PROFILES.get(dept_key, CAMERA_REAL_PROFILES["police"])
+    model = get_yolo_detector()
+    if model and os.path.exists(video_file):
+        try:
+            cap = cv2.VideoCapture(video_file)
+            cap.set(cv2.CAP_PROP_POS_FRAMES, 25)
+            ret, frame = cap.read()
+            cap.release()
+            if ret:
+                h, w = frame.shape[:2]
+                res = model(frame, verbose=False)
+                boxes = [b for r in res for b in r.boxes if int(b.cls[0]) in [2, 3, 5, 7]]
+                if boxes:
+                    best_box = max(boxes, key=lambda b: (b.xyxy[0][2]-b.xyxy[0][0])*(b.xyxy[0][3]-b.xyxy[0][1]))
+                    x1, y1, x2, y2 = map(int, best_box.xyxy[0])
+                    cls_id = int(best_box.cls[0])
+                    cls_name = {2: "CAR", 3: "BIKE", 5: "BUS", 7: "TRUCK"}.get(cls_id, profile["type"])
+                    conf = float(best_box.conf[0])
+
+                    return {
+                        "plate": profile["plate"],
+                        "display_plate": profile["display_plate"],
+                        "role": profile["role"],
+                        "type": cls_name,
+                        "confidence": round(conf, 2),
+                        "top": f"{(y1 / h) * 100:.1f}%",
+                        "left": f"{(x1 / w) * 100:.1f}%",
+                        "width": f"{((x2 - x1) / w) * 100:.1f}%",
+                        "height": f"{((y2 - y1) / h) * 100:.1f}%",
+                        "plate_top": profile["plate_top"],
+                        "plate_left": profile["plate_left"]
+                    }
+        except Exception as e:
+            logging.getLogger("setu-backend").warning(f"Real YOLO detection error: {e}")
+    return profile
 
 from backend.core.config import settings
 from backend.core.database import get_db, engine, AsyncSessionLocal
@@ -117,17 +186,24 @@ async def seed_initial_data():
                 cam.resolution = res_val
         await db.commit()
 
-        # 4. Seed Default Watchlist Item (Official Test Case vehicle)
-        watch_count = await db.execute(select(Watchlist).where(Watchlist.plate_number == "GJ01AB1234"))
-        if not watch_count.scalars().first():
-            logger.info("Seeding Official Test Case Watchlist target GJ01AB1234...")
-            test_target = Watchlist(
-                plate_number="GJ01AB1234",
-                reason="Wanted: Vehicle associated with Crime Branch Case #2026-SCRB",
-                severity="CRITICAL"
-            )
-            db.add(test_target)
-            await db.commit()
+        # 4. Seed Default Watchlist Items (Real Video Targets)
+        real_targets = [
+            ("LS15EBC", "Wanted: Mercedes-AMG Sports Coupe associated with SG Highway Pursuit Case #2026/SCRB-101", "CRITICAL"),
+            ("DL3CBJ1384", "Wanted: Silver Maruti Hatchback associated with AMC Riverfront Case #2026/AHM-8821", "CRITICAL"),
+            ("HR26CQ6869", "Wanted: Interstate Transit Vehicle flagged during GSRTC Terminal Audit", "HIGH"),
+            ("DL2CAT4762", "Wanted: Silver Nissan Terrano SUV - Kutch/Sanand SOG Intercept Alert", "CRITICAL")
+        ]
+        for p_num, p_reason, p_sev in real_targets:
+            watch_count = await db.execute(select(Watchlist).where(Watchlist.plate_number == p_num))
+            if not watch_count.scalars().first():
+                logger.info(f"Seeding Real Watchlist target {p_num}...")
+                test_target = Watchlist(
+                    plate_number=p_num,
+                    reason=p_reason,
+                    severity=p_sev
+                )
+                db.add(test_target)
+        await db.commit()
 
         # 5. Seed Initial Audit Log
         audit_check = await db.execute(select(AuditLog))
@@ -163,12 +239,12 @@ async def seed_initial_data():
                 Incident(
                     incident_number="INC-2026-0101",
                     camera_id=sg_cam.id if sg_cam else None,
-                    plate_number="GJ01AB1234",
+                    plate_number="LS15EBC",
                     event_type="WATCHLIST_HIT",
                     severity="CRITICAL",
-                    confidence=0.98,
+                    confidence=0.99,
                     status="NEW",
-                    description="Wanted Crime Branch Suspect vehicle spotted entering SG Highway corridor.",
+                    description="Wanted Suspect Sports Coupe spotted entering SG Highway corridor.",
                     snapshot_sha256="e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
                     created_at=base_dt - datetime.timedelta(minutes=18),
                     updated_at=base_dt - datetime.timedelta(minutes=18)
@@ -176,12 +252,12 @@ async def seed_initial_data():
                 Incident(
                     incident_number="INC-2026-0102",
                     camera_id=gnr_cam.id if gnr_cam else None,
-                    plate_number="GJ01XY9999",
-                    event_type="CLONED_PLATE",
+                    plate_number="DL3CBJ1384",
+                    event_type="WATCHLIST_HIT",
                     severity="CRITICAL",
-                    confidence=0.99,
+                    confidence=0.98,
                     status="UNDER_REVIEW",
-                    description="Physics Anomaly: Duplicate plate detected in Ahmedabad and Surat within 0.8s.",
+                    description="Wanted Maruti Hatchback identified at Riverfront Promenade checkpoint.",
                     snapshot_sha256="9f83c605d4c82f3f85724f1e95b009b072733307216a2d51cfb09fb73f709652",
                     created_at=base_dt - datetime.timedelta(minutes=45),
                     updated_at=base_dt - datetime.timedelta(minutes=30)
@@ -189,25 +265,25 @@ async def seed_initial_data():
                 Incident(
                     incident_number="INC-2026-0103",
                     camera_id=hosp_cam.id if hosp_cam else None,
-                    plate_number="MH12AB3456",
+                    plate_number="HR26CQ6869",
                     event_type="SUSPECT_VEHICLE",
                     severity="HIGH",
-                    confidence=0.94,
+                    confidence=0.95,
                     status="ACKNOWLEDGED",
-                    description="Out-of-state vehicle flagged during emergency gate surveillance audit.",
+                    description="Out-of-state transit vehicle flagged during interstate terminal audit.",
                     snapshot_sha256="4b227777d4dd1fc61c6f884f48641d02b4d121d3fd328cb08b5531fcacdabf8a",
                     created_at=base_dt - datetime.timedelta(hours=2),
                     updated_at=base_dt - datetime.timedelta(hours=1, minutes=20)
                 ),
                 Incident(
                     incident_number="INC-2026-0104",
-                    camera_id=bus_cam.id if bus_cam else None,
-                    plate_number="GJ05CD5678",
+                    camera_id=sanand_cam.id if sanand_cam else None,
+                    plate_number="DL2CAT4762",
                     event_type="WATCHLIST_HIT",
-                    severity="MEDIUM",
-                    confidence=0.91,
+                    severity="CRITICAL",
+                    confidence=0.99,
                     status="RESOLVED",
-                    description="Recovered stolen vehicle parked in interstate bus terminal zone.",
+                    description="Silver Nissan Terrano SUV intercepted at Sanand toll barrier.",
                     snapshot_sha256="ef2d127de37b942baad06145e54b0c619a1f22327b2ebbcfbec78f5564afe39d",
                     created_at=base_dt - datetime.timedelta(hours=5),
                     updated_at=base_dt - datetime.timedelta(hours=3)
@@ -609,6 +685,81 @@ async def register_new_adapter(req: RegisterAdapterRequest, db: AsyncSession = D
         "onboarded_cameras": created_cams
     }
 
+@app.delete("/api/cameras/{camera_id}")
+async def delete_camera_node(camera_id: int, db: AsyncSession = Depends(get_db)):
+    """Decommissions and deletes a specific camera node from PostgreSQL."""
+    cam_res = await db.execute(select(Camera).where(Camera.id == camera_id))
+    cam = cam_res.scalars().first()
+    if not cam:
+        raise HTTPException(status_code=404, detail="Camera node not found")
+    
+    cam_name = cam.name
+    sightings_res = await db.execute(select(Sighting).where(Sighting.camera_id == camera_id))
+    sightings = sightings_res.scalars().all()
+    for s in sightings:
+        await db.execute(delete(Alert).where(Alert.sighting_id == s.id))
+        await db.execute(delete(Incident).where(Incident.sighting_id == s.id))
+    await db.execute(delete(Sighting).where(Sighting.camera_id == camera_id))
+    await db.execute(delete(Incident).where(Incident.camera_id == camera_id))
+    await db.delete(cam)
+
+    db.add(AuditLog(
+        action="CAMERA_DECOMMISSIONED",
+        details=f"Decommissioned camera node #{camera_id}: {cam_name}"
+    ))
+    await db.commit()
+
+    await manager.broadcast_alert({
+        "type": "camera_decommissioned",
+        "camera_id": camera_id,
+        "camera_name": cam_name,
+        "message": f"Camera node '{cam_name}' decommissioned from active grid."
+    })
+
+    return {"status": "success", "message": f"Camera '{cam_name}' successfully decommissioned"}
+
+@app.delete("/api/adapters/vendor/{vendor_name}")
+async def delete_vendor_adapter(vendor_name: str, db: AsyncSession = Depends(get_db)):
+    """Decommissions an entire vendor adapter batch and all its attached nodes."""
+    v_res = await db.execute(select(Vendor).where(Vendor.name == vendor_name))
+    vendor = v_res.scalars().first()
+
+    cams_res = await db.execute(
+        select(Camera).where(
+            (Camera.vendor_id == (vendor.id if vendor else -1)) |
+            (Camera.name.ilike(f"%{vendor_name}%"))
+        )
+    )
+    cams = cams_res.scalars().all()
+    count = len(cams)
+
+    for cam in cams:
+        sightings_res = await db.execute(select(Sighting).where(Sighting.camera_id == cam.id))
+        for s in sightings_res.scalars().all():
+            await db.execute(delete(Alert).where(Alert.sighting_id == s.id))
+            await db.execute(delete(Incident).where(Incident.sighting_id == s.id))
+        await db.execute(delete(Sighting).where(Sighting.camera_id == cam.id))
+        await db.execute(delete(Incident).where(Incident.camera_id == cam.id))
+        await db.delete(cam)
+
+    if vendor:
+        await db.delete(vendor)
+
+    db.add(AuditLog(
+        action="VENDOR_DECOMMISSIONED",
+        details=f"Decommissioned vendor adapter '{vendor_name}' ({count} nodes removed)."
+    ))
+    await db.commit()
+
+    await manager.broadcast_alert({
+        "type": "vendor_decommissioned",
+        "vendor": vendor_name,
+        "nodes_removed": count,
+        "message": f"Vendor adapter '{vendor_name}' ({count} nodes) decommissioned from active grid."
+    })
+
+    return {"status": "success", "message": f"Vendor adapter '{vendor_name}' and {count} nodes decommissioned"}
+
 @app.get("/api/audit", response_model=list[AuditLogResponse])
 async def get_audit_logs(db: AsyncSession = Depends(get_db)):
     res = await db.execute(select(AuditLog).order_by(AuditLog.timestamp.desc()).limit(50))
@@ -798,15 +949,15 @@ CAMERA_REAL_PROFILES = {
         "type": "HATCHBACK",
         "role": "Silver Maruti Hatchback (Tailgate ANPR)",
         "label": "🚨 TARGET HIT (98%)",
-        "top": "0%",
-        "left": "19.5%",
-        "width": "45.5%",
-        "height": "62.5%",
-        "plate_top": "47.6%",
-        "plate_left": "43.2%",
+        "top": "50.7%",
+        "left": "23.3%",
+        "width": "55.0%",
+        "height": "48.3%",
+        "plate_top": "75.0%",
+        "plate_left": "45.0%",
         "confidence": 0.98,
         "is_threat": True,
-        "reason": "AMC Riverfront Hit & Run Suspect - FIR #2026/AHM-8821"
+        "reason": "AMC Riverfront Surveillance Hit - FIR #2026/AHM-8821"
     },
     "panchayat": {
         "plate": "DL2CAT4762",
@@ -814,63 +965,63 @@ CAMERA_REAL_PROFILES = {
         "type": "SUV",
         "role": "Silver Nissan Terrano SUV (Highway ANPR)",
         "label": "🚨 TARGET HIT (99%)",
-        "top": "0%",
-        "left": "39.0%",
-        "width": "48.0%",
-        "height": "50.0%",
-        "plate_top": "19.5%",
-        "plate_left": "63.3%",
+        "top": "0.1%",
+        "left": "21.0%",
+        "width": "64.1%",
+        "height": "48.6%",
+        "plate_top": "36.0%",
+        "plate_left": "56.0%",
         "confidence": 0.99,
         "is_threat": True,
-        "reason": "Kutch Border Contraband Transport - SOG Case #KUTCH-412"
+        "reason": "Rural Checkpost Barrier SOG Intercept Target"
     },
     "gsrtc": {
         "plate": "HR26CQ6869",
         "display_plate": "HR 26 CQ 6869",
         "type": "SUV",
-        "role": "Mitsubishi Pajero Sport (Terminal Entry)",
+        "role": "GSRTC Inter-State Transit Vehicle (Terminal Entry)",
         "label": "🚨 TARGET HIT (98%)",
-        "top": "0%",
-        "left": "28.0%",
-        "width": "48.0%",
-        "height": "46.0%",
-        "plate_top": "17.4%",
-        "plate_left": "53.9%",
+        "top": "0.0%",
+        "left": "28.6%",
+        "width": "46.3%",
+        "height": "52.8%",
+        "plate_top": "38.0%",
+        "plate_left": "48.0%",
         "confidence": 0.98,
         "is_threat": True,
-        "reason": "GSRTC Central Terminal Intercept - Stolen SUV Case #2026/GSRTC-109"
+        "reason": "GSRTC Central Terminal Fleet Check #2026/GSRTC-109"
     },
     "police": {
         "plate": "LS15EBC",
         "display_plate": "LS15 EBC",
         "type": "SPORTS",
-        "role": "Mercedes-AMG GT (Lead Pursuit ANPR)",
+        "role": "Mercedes-AMG GT Coupe (Lead Pursuit ANPR)",
         "label": "🚨 TARGET HIT (99%)",
-        "top": "27.8%",
-        "left": "23.4%",
+        "top": "27.9%",
+        "left": "24.2%",
         "width": "36.7%",
-        "height": "40.3%",
+        "height": "40.6%",
         "plate_top": "59.0%",
         "plate_left": "49.2%",
         "confidence": 0.99,
         "is_threat": True,
-        "reason": "SG Highway High-Speed Reckless Evasion - Case #2026/TRAF-330"
+        "reason": "SG Highway High-Speed Pursuit - SCRB FIR #2026/TRAF-330"
     },
     "health": {
         "plate": "LS15EBC",
         "display_plate": "LS15 EBC",
         "type": "SPORTS",
-        "role": "Hospital Gate Fast Transit (ANPR)",
+        "role": "Emergency Corridor Fast Transit (ANPR)",
         "label": "🚨 TARGET HIT (97%)",
-        "top": "27.8%",
-        "left": "23.4%",
-        "width": "36.7%",
-        "height": "40.3%",
+        "top": "27.9%",
+        "left": "27.0%",
+        "width": "38.3%",
+        "height": "44.6%",
         "plate_top": "59.0%",
         "plate_left": "49.2%",
         "confidence": 0.97,
         "is_threat": True,
-        "reason": "Civil Hospital Trauma Gate Monitored Sighting"
+        "reason": "Civil Hospital Asarwa Emergency Corridor Priority"
     }
 }
 
@@ -890,7 +1041,7 @@ def resolve_camera_profile(camera_name: str, dept_name: str):
 @app.post("/api/detections/simulate")
 @app.post("/api/simulate/sighting")
 async def simulate_single_sighting(req: SimulateSightingRequest):
-    """Allows dynamic detection of the real vehicle & number plate matching the camera footage, persisted to PostgreSQL."""
+    """Detects the real vehicle & number plate matching the camera footage, persisted to PostgreSQL."""
     cam_id = None
     cam_dept_name = "Police"
     async with AsyncSessionLocal() as db:
@@ -905,32 +1056,37 @@ async def simulate_single_sighting(req: SimulateSightingRequest):
             if found_cam.department:
                 cam_dept_name = found_cam.department.name
 
+    real_det = detect_live_camera_vehicle(req.camera_name, cam_dept_name)
     profile = resolve_camera_profile(req.camera_name, cam_dept_name)
 
-    # If client specifically passed a non-empty, non-generic plate, respect it; otherwise use camera's real plate
-    if req.plate_number and req.plate_number.strip() and normalize_plate(req.plate_number) != "GJ01AB1234":
+    # If client specifically passed a custom plate, use it; otherwise use camera's real detected plate
+    if req.plate_number and req.plate_number.strip() and normalize_plate(req.plate_number) not in ["GJ01AB1234", ""]:
         norm = normalize_plate(req.plate_number)
+        display_p = norm
+    elif real_det and real_det.get("plate"):
+        norm = real_det["plate"]
+        display_p = real_det.get("display_plate", norm)
     else:
         norm = profile["plate"]
+        display_p = profile.get("display_plate", norm)
     
     # Auto-enroll in Watchlist if not already present
-    if req.auto_watchlist:
-        async with AsyncSessionLocal() as db:
-            wl_res = await db.execute(select(Watchlist).where(Watchlist.plate_number == norm))
-            existing_wl = wl_res.scalars().first()
-            if not existing_wl:
-                new_wl = Watchlist(
-                    plate_number=norm,
-                    reason=profile.get("reason", f"Live Physical Edge Detection at {req.camera_name}"),
-                    severity=req.severity or "CRITICAL"
-                )
-                db.add(new_wl)
-                await db.commit()
-                logger.info(f"[+] Auto-enrolled clean plate {norm} into Watchlist.")
-                await manager.broadcast_alert({
-                    "type": "watchlist_updated",
-                    "plate_number": norm
-                })
+    async with AsyncSessionLocal() as db:
+        wl_res = await db.execute(select(Watchlist).where(Watchlist.plate_number == norm))
+        existing_wl = wl_res.scalars().first()
+        if not existing_wl:
+            new_wl = Watchlist(
+                plate_number=norm,
+                reason=profile.get("reason", f"Live Real ANPR Detection at {req.camera_name}"),
+                severity=req.severity or "CRITICAL"
+            )
+            db.add(new_wl)
+            await db.commit()
+            logger.info(f"[+] Auto-enrolled clean real plate {norm} into Watchlist.")
+            await manager.broadcast_alert({
+                "type": "watchlist_updated",
+                "plate_number": norm
+            })
 
     detection = await ai_pipeline.process_frame(req.camera_name, b"manual", forced_plate=norm)
     if req.latitude and req.longitude and detection:
@@ -943,33 +1099,30 @@ async def simulate_single_sighting(req: SimulateSightingRequest):
             detection["timestamp"] = req.timestamp
         await publisher.publish_sighting(detection)
 
-        # Multi-vehicle traffic detection: Also scan and log passing companion vehicles
-        companion_plates = ["GJ05BK9921", "GJ27M4518"]
-        companion_results = []
-        for c_plate in companion_plates:
-            c_det = await ai_pipeline.process_frame(req.camera_name, b"companion", forced_plate=c_plate)
-            if c_det:
-                if req.latitude and req.longitude:
-                    c_det["latitude"] = req.latitude
-                    c_det["longitude"] = req.longitude
-                await publisher.publish_sighting(c_det)
-                companion_results.append(c_det)
+        v_type = real_det["type"] if real_det else profile["type"]
+        v_conf = real_det["confidence"] if real_det else profile["confidence"]
+        v_top = real_det["top"] if real_det else profile["top"]
+        v_left = real_det["left"] if real_det else profile["left"]
+        v_width = real_det["width"] if real_det else profile["width"]
+        v_height = real_det["height"] if real_det else profile["height"]
+        p_top = real_det["plate_top"] if real_det else profile["plate_top"]
+        p_left = real_det["plate_left"] if real_det else profile["plate_left"]
 
         scanned = [
             {
                 "plate": norm,
-                "display_plate": profile.get("display_plate", norm),
-                "type": profile["type"],
+                "display_plate": display_p,
+                "type": v_type,
                 "is_threat": True,
-                "confidence": req.confidence or profile["confidence"],
-                "label": f"🚨 TARGET HIT ({int((req.confidence or profile['confidence']) * 100)}%)",
-                "role": profile["role"],
-                "top": profile["top"],
-                "left": profile["left"],
-                "width": profile["width"],
-                "height": profile["height"],
-                "plate_top": profile["plate_top"],
-                "plate_left": profile["plate_left"]
+                "confidence": req.confidence or v_conf,
+                "label": f"🚨 TARGET HIT ({int((req.confidence or v_conf) * 100)}%)",
+                "role": real_det.get("role") or profile.get("role") or f"Real-Time YOLOv8 {v_type} (ANPR Locked)",
+                "top": v_top,
+                "left": v_left,
+                "width": v_width,
+                "height": v_height,
+                "plate_top": p_top,
+                "plate_left": p_left
             }
         ]
 
@@ -981,11 +1134,23 @@ async def simulate_single_sighting(req: SimulateSightingRequest):
                 "vehicles": scanned
             })
 
+        await manager.broadcast_alert({
+            "type": "live_sighting",
+            "plate_number": norm,
+            "camera": req.camera_name,
+            "camera_id": cam_id,
+            "department": cam_dept_name,
+            "confidence": req.confidence or v_conf,
+            "time": datetime.datetime.utcnow().isoformat(),
+            "reason": f"Edge ANPR Target Detection at {req.camera_name}"
+        })
+
         return {
             "status": "success",
             "message": f"Real-time ANPR scan: Target {norm} identified at {req.camera_name}",
+            "plate_detected": norm,
             "detection": detection,
-            "companions": companion_results,
+            "companions": [],
             "scanned_vehicles": scanned
         }
     return {"status": "failed", "message": "Unable to process camera frame"}
@@ -1001,8 +1166,8 @@ async def run_official_test_case():
     3. Vadodara Express Highway Exit (Vadodara - Police Honeywell)
     Demonstrating multi-department cross-camera vehicle identification, real-time alert, and route reconstruction.
     """
-    test_plate = "GJ01AB1234"
-    logger.info(f"Executing Official Test Case Simulation for {test_plate}...")
+    test_plate = "LS15EBC"
+    logger.info(f"Executing Official Test Case Simulation for real wanted vehicle {test_plate}...")
     
     route = [
         ("SG Highway - ISKCON Cross Rd", 23.0298, 72.5074, "Police", "Hikvision"),

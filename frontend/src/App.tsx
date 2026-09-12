@@ -148,7 +148,7 @@ type TabType = 'command' | 'cctv' | 'alerts' | 'investigation' | 'gis' | 'watchl
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<TabType>('command');
-  const [searchQuery, setSearchQuery] = useState('GJ01AB1234');
+  const [searchQuery, setSearchQuery] = useState('LS15EBC');
   const [searchResults, setSearchResults] = useState<Sighting[]>([]);
   const [cameras, setCameras] = useState<CameraNode[]>([]);
   const [departments, setDepartments] = useState<DepartmentItem[]>([]);
@@ -158,6 +158,7 @@ export default function App() {
   const [selectedCamera, setSelectedCamera] = useState<CameraNode | null>(null);
   const [isSimulating, setIsSimulating] = useState(false);
   const [wsConnected, setWsConnected] = useState(false);
+  const [focusedWaypointId, setFocusedWaypointId] = useState<number | null>(null);
   
   // Incident & Dashboard State (PostgreSQL)
   const [incidents, setIncidents] = useState<IncidentItem[]>([]);
@@ -202,7 +203,7 @@ export default function App() {
   const [adapterSuccessMsg, setAdapterSuccessMsg] = useState('');
 
   // Custom Vehicle Sighting & Pursuit Simulation State
-  const [customPlateInput, setCustomPlateInput] = useState('GJ03XX5555');
+  const [customPlateInput, setCustomPlateInput] = useState('LS15EBC');
   const [customCameraInput, setCustomCameraInput] = useState('SG Highway - ISKCON Cross Rd');
   const [customSimMsg, setCustomSimMsg] = useState('');
 
@@ -242,7 +243,7 @@ export default function App() {
         if (data && data.length > 0) {
           const mapped: LiveAlert[] = data.map((a: any) => ({
             type: a.alert_type,
-            plate_number: a.plate_number || 'GJ01AB1234',
+            plate_number: a.plate_number || 'LS15EBC',
             alert_level: a.alert_level,
             camera: a.camera_name,
             department: a.department,
@@ -299,9 +300,20 @@ export default function App() {
           }
           if (data.camera_id) {
             const vehicles: DetectedVehicle[] = [
-              { plate: data.plate_number, type: 'TARGET', is_threat: true, confidence: data.confidence || 0.98, label: '🚨 CRITICAL TARGET', role: 'Lead Sedan (Front Approach)', top: '24%', left: '28%' },
-              { plate: 'GJ05BK9921', type: 'SEDAN', is_threat: false, confidence: 0.95, label: '✓ COMMUTER SEDAN', role: 'Following Car (Rear Plate)', top: '62%', left: '52%' },
-              { plate: 'GJ27M4518', type: 'BIKE', is_threat: false, confidence: 0.92, label: '✓ TWO-WHEELER', role: 'Motorbike (Commuter)', top: '60%', left: '6%' }
+              {
+                plate: data.plate_number,
+                type: data.vehicle_type || 'TARGET',
+                is_threat: true,
+                confidence: data.confidence || 0.98,
+                label: `🚨 TARGET HIT (${Math.round((data.confidence || 0.98) * 100)}%)`,
+                role: data.role || 'Live Target Vehicle (Real ANPR)',
+                top: data.top || '24%',
+                left: data.left || '28%',
+                width: data.width || '44%',
+                height: data.height || '54%',
+                plate_top: data.plate_top || '58%',
+                plate_left: data.plate_left || '48%'
+              }
             ];
             setCameraHits(prev => ({
               ...prev,
@@ -428,6 +440,10 @@ export default function App() {
         el.innerHTML = `<span>#${idx + 1}</span>`;
       }
 
+      el.addEventListener('click', () => {
+        focusWaypointOnMap(sighting, idx);
+      });
+
       const marker = new window.maplibregl.Marker({ element: el })
         .setLngLat([sighting.longitude, sighting.latitude])
         .setPopup(
@@ -462,6 +478,59 @@ export default function App() {
         const bounds = coordinates.reduce((b: any, coord: any) => b.extend(coord), new window.maplibregl.LngLatBounds(coordinates[0], coordinates[0]));
         map.fitBounds(bounds, { padding: 75, maxZoom: 13 });
       }
+    }
+  };
+
+  // Helper to fly to & highlight a specific waypoint on the GIS Map
+  const focusWaypointOnMap = (sighting: Sighting, idx: number) => {
+    setFocusedWaypointId(sighting.id);
+    const map = mapInstanceRef.current;
+    if (!map) return;
+
+    map.flyTo({
+      center: [sighting.longitude, sighting.latitude],
+      zoom: 14.5,
+      speed: 1.4,
+      curve: 1.2,
+      essential: true
+    });
+
+    // Bring focused waypoint marker to absolute top of visual stack (z-index)
+    // Resolves marker overlap when a vehicle visits the same junction multiple times
+    if (markersRef.current) {
+      markersRef.current.forEach((m, mIdx) => {
+        try {
+          const markerEl = m.getElement();
+          if (markerEl) {
+            if (mIdx === idx) {
+              markerEl.style.zIndex = '99999';
+              markerEl.classList.add('focused-marker-top');
+            } else {
+              markerEl.style.zIndex = '';
+              markerEl.classList.remove('focused-marker-top');
+            }
+          }
+        } catch (e) {
+          // ignore
+        }
+      });
+    }
+
+    if (markersRef.current && markersRef.current[idx]) {
+      try {
+        const marker = markersRef.current[idx];
+        const popup = marker.getPopup();
+        if (popup && !popup.isOpen()) {
+          marker.togglePopup();
+        }
+      } catch (err) {
+        // Safe ignore
+      }
+    }
+
+    const cardEl = document.getElementById(`waypoint-card-${sighting.id}`);
+    if (cardEl) {
+      cardEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     }
   };
 
@@ -618,8 +687,8 @@ export default function App() {
       .then(() => {
         setTimeout(() => {
           setIsSimulating(false);
-          setSearchQuery('GJ01AB1234');
-          performSearch('GJ01AB1234');
+          setSearchQuery('LS15EBC');
+          performSearch('LS15EBC');
           setActiveTab('investigation');
         }, 1200);
       })
@@ -627,6 +696,42 @@ export default function App() {
         console.error("Simulation error", err);
         setIsSimulating(false);
       });
+  };
+
+  // Trace Any Custom Plate Directly Across Gujarat Corridor
+  const handleTraceCustomPlate = async (plate: string) => {
+    const target = normalizeInput(plate || searchQuery || 'LS15EBC');
+    if (!target) return;
+    setIsSimulating(true);
+    showToast('Dispatching Corridor Route', `Simulating sightings across Gujarat highway nodes for ${target}...`);
+    const route = [
+      { cam: "SG Highway - ISKCON Cross Rd", lat: 23.0298, lon: 72.5074 },
+      { cam: "Gandhinagar CH-0 Circle", lat: 23.2156, lon: 72.6369 },
+      { cam: "Vadodara Express Highway Exit", lat: 22.3107, lon: 73.1812 }
+    ];
+    for (let i = 0; i < route.length; i++) {
+      const step = route[i];
+      try {
+        await fetch('http://127.0.0.1:8000/api/simulate/sighting', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            camera_name: step.cam,
+            plate_number: target,
+            latitude: step.lat,
+            longitude: step.lon,
+            auto_watchlist: true
+          })
+        });
+      } catch (e) {
+        console.error(e);
+      }
+      await new Promise(r => setTimeout(r, 250));
+    }
+    setSearchQuery(target);
+    await performSearch(target);
+    setIsSimulating(false);
+    showToast('Route Reconstructed', `Reconstructed 3-point pursuit across Gujarat for ${target}`);
   };
 
   // Trigger Cloned Plate Anomaly
@@ -710,6 +815,53 @@ export default function App() {
       .catch(err => console.error("Adapter registration failed", err));
   };
 
+  // Delete / Decommission Single Camera Node
+  const handleDeleteCamera = async (camId: number, camName: string) => {
+    if (!window.confirm(`Decommission camera node "${camName}"?\n\nThis will safely remove the camera from the network and log an immutable DPDP Act audit record.`)) {
+      return;
+    }
+    try {
+      const res = await fetch(`http://127.0.0.1:8000/api/cameras/${camId}`, {
+        method: 'DELETE'
+      });
+      if (res.ok) {
+        setCameras(prev => prev.filter(c => c.id !== camId));
+        setAdapterSuccessMsg(`✅ Decommissioned camera node "${camName}" successfully.`);
+        setTimeout(() => setAdapterSuccessMsg(''), 5000);
+        fetchAllData();
+      } else {
+        const err = await res.json().catch(() => ({ detail: 'Failed to delete' }));
+        alert(`Could not decommission camera: ${err.detail || 'Server error'}`);
+      }
+    } catch (err) {
+      console.error("Camera decommission error", err);
+      alert("Network error while trying to decommission camera.");
+    }
+  };
+
+  // Decommission Entire Vendor Adapter Fleet Batch
+  const handleDecommissionVendor = async (vendorName: string) => {
+    if (!window.confirm(`Decommission all cameras and adapter config for vendor "${vendorName}"?\n\nAll linked camera nodes for this vendor will be removed.`)) {
+      return;
+    }
+    try {
+      const res = await fetch(`http://127.0.0.1:8000/api/adapters/vendor/${encodeURIComponent(vendorName)}`, {
+        method: 'DELETE'
+      });
+      if (res.ok) {
+        setAdapterSuccessMsg(`✅ Decommissioned vendor adapter "${vendorName}" and associated nodes.`);
+        setTimeout(() => setAdapterSuccessMsg(''), 5000);
+        fetchAllData();
+      } else {
+        const err = await res.json().catch(() => ({ detail: 'Failed to delete' }));
+        alert(`Could not decommission vendor: ${err.detail || 'Server error'}`);
+      }
+    } catch (err) {
+      console.error("Vendor decommission error", err);
+      alert("Network error while trying to decommission vendor adapter.");
+    }
+  };
+
   // Custom Vehicle Sighting & Highway Route Simulation Handlers
   const handleSimulateCustomPlate = async () => {
     if (!customPlateInput) return;
@@ -786,7 +938,7 @@ export default function App() {
       const data = await res.json();
       if (res.ok) {
         const vehicles: DetectedVehicle[] = data.scanned_vehicles || [];
-        const detectedPlate = data.detection?.plate_number || (vehicles[0]?.plate) || 'DL3CBJ1384';
+        const detectedPlate = data.detection?.plate_number || (vehicles[0]?.plate) || 'LS15EBC';
         const displayPlate = vehicles[0]?.display_plate || detectedPlate;
 
         setCameraHits(prev => ({
@@ -921,7 +1073,7 @@ export default function App() {
                   <button
                     className="btn-trace-toast"
                     onClick={() => {
-                      handleTraceIncident(toast.plate || 'GJ01AB1234');
+                      handleTraceIncident(toast.plate || 'LS15EBC');
                       setToast(null);
                     }}
                   >
@@ -1000,7 +1152,7 @@ export default function App() {
             className="btn-official-test" 
             onClick={handleRunOfficialTestCase} 
             disabled={isSimulating}
-            title="Simulates wanted target GJ01AB1234 moving across Ahmedabad -> Gandhinagar -> Vadodara"
+            title="Simulates wanted real target LS15EBC moving across Ahmedabad -> Gandhinagar -> Vadodara"
           >
             {isSimulating ? '⚡ DISPATCHING ROUTE...' : '⚡ RUN OFFICIAL TEST CASE'}
           </button>
@@ -1410,7 +1562,7 @@ export default function App() {
                               className="btn-investigate-now"
                               onClick={(e) => {
                                 e.stopPropagation();
-                                const hitPlate = cameraHits[cam.id]?.vehicles[0]?.plate || 'DL3CBJ1384';
+                                const hitPlate = cameraHits[cam.id]?.vehicles[0]?.plate || 'LS15EBC';
                                 handleTraceIncident(hitPlate);
                               }}
                               title="Open Vehicle Investigation with GIS route mapping"
@@ -1715,17 +1867,20 @@ export default function App() {
               <div className="search-box">
                 <h2>🔎 Vehicle Route Investigator</h2>
                 
-                {/* Quick Target Pills */}
+                {/* Quick Target Pills for Real Detected Vehicles */}
                 <div className="quick-target-pills">
-                  <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)', alignSelf: 'center' }}>Samples:</span>
-                  <button className="target-pill-btn" onClick={() => { setSearchQuery('GJ01AB1234'); performSearch('GJ01AB1234'); }}>
-                    GJ01AB1234 (Official Test)
+                  <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)', alignSelf: 'center' }}>Live Targets:</span>
+                  <button className="target-pill-btn" onClick={() => { setSearchQuery('LS15EBC'); performSearch('LS15EBC'); }}>
+                    LS15EBC (Pursuit Coupe)
                   </button>
-                  <button className="target-pill-btn" onClick={() => { setSearchQuery('GJ01A81234'); performSearch('GJ01A81234'); }}>
-                    GJ01A81234 (Fuzzy Misread)
+                  <button className="target-pill-btn" onClick={() => { setSearchQuery('DL3CBJ1384'); performSearch('DL3CBJ1384'); }}>
+                    DL3CBJ1384 (Riverfront Car)
                   </button>
-                  <button className="target-pill-btn" onClick={() => { setSearchQuery('GJ01XY9999'); performSearch('GJ01XY9999'); }}>
-                    GJ01XY9999 (Cloned Plate)
+                  <button className="target-pill-btn" onClick={() => { setSearchQuery('HR26CQ6869'); performSearch('HR26CQ6869'); }}>
+                    HR26CQ6869 (Terminal SUV)
+                  </button>
+                  <button className="target-pill-btn" onClick={() => { setSearchQuery('DL2CAT4762'); performSearch('DL2CAT4762'); }}>
+                    DL2CAT4762 (Sanand SUV)
                   </button>
                 </div>
 
@@ -1733,13 +1888,22 @@ export default function App() {
                   <input
                     type="text"
                     className="input-police"
-                    placeholder="Enter Registration (e.g., GJ01AB1234)"
+                    placeholder="Enter Registration (e.g., LS15EBC)"
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
                     onKeyDown={(e) => e.key === 'Enter' && performSearch(searchQuery)}
                   />
                   <button className="btn-search-action" onClick={() => performSearch(searchQuery)}>
                     Trace
+                  </button>
+                  <button 
+                    className="btn-official-test"
+                    style={{ whiteSpace: 'nowrap', fontSize: '0.8rem', padding: '0.5rem 0.85rem' }}
+                    onClick={() => handleTraceCustomPlate(searchQuery || 'LS15EBC')}
+                    disabled={isSimulating}
+                    title="Directly add & trace route for this registration across Gujarat cameras"
+                  >
+                    ⚡ Trace Corridor
                   </button>
                 </div>
               </div>
@@ -1751,50 +1915,142 @@ export default function App() {
                   {searchResults.length === 0 ? (
                     <div className="empty-state-box">
                       <span className="empty-icon">📍</span>
-                      <p>No recorded sightings yet for {searchQuery}.</p>
-                      <button 
-                        className="btn-official-test" 
-                        style={{ marginTop: '0.8rem', fontSize: '0.78rem' }}
-                        onClick={handleRunOfficialTestCase}
-                      >
-                        ⚡ Simulate Official Test Case Route
-                      </button>
+                      <p>No recorded sightings yet for {searchQuery || 'this plate'}.</p>
+                      <div style={{ display: 'flex', gap: '0.6rem', marginTop: '0.8rem', flexWrap: 'wrap', justifyContent: 'center' }}>
+                        <button 
+                          className="btn-official-test" 
+                          style={{ fontSize: '0.78rem' }}
+                          onClick={() => handleTraceCustomPlate(searchQuery || 'LS15EBC')}
+                          disabled={isSimulating}
+                        >
+                          ⚡ Trace Route for {searchQuery || 'LS15EBC'} Across Gujarat
+                        </button>
+                        <button 
+                          className="btn-trace-quick" 
+                          style={{ fontSize: '0.78rem', borderColor: 'var(--accent-cyan)', color: 'var(--accent-cyan)' }}
+                          onClick={handleRunOfficialTestCase}
+                          disabled={isSimulating}
+                        >
+                          Official Test Case (LS15EBC)
+                        </button>
+                      </div>
                     </div>
                   ) : (
-                    searchResults.map((sighting, idx) => (
-                      <div key={sighting.id} className="timeline-card glass-panel">
-                        <div className="card-top-meta">
-                          <span className="step-num">WAYPOINT #{idx + 1}</span>
-                          <span className="time-badge">{new Date(sighting.timestamp).toLocaleTimeString()}</span>
-                        </div>
+                    searchResults.map((sighting, idx) => {
+                      const isFocused = focusedWaypointId === sighting.id;
+                      const isLatest = idx === searchResults.length - 1;
+                      return (
+                        <div
+                          key={sighting.id}
+                          id={`waypoint-card-${sighting.id}`}
+                          className={`timeline-card glass-panel ${isFocused ? 'focused-waypoint-card' : ''}`}
+                          style={{
+                            borderLeft: isFocused
+                              ? '4px solid #10b981'
+                              : isLatest
+                              ? '3px solid #10b981'
+                              : '3px solid var(--accent-cyan)',
+                            boxShadow: isFocused ? '0 0 18px rgba(0, 240, 255, 0.4)' : undefined,
+                            background: isFocused ? 'rgba(15, 23, 42, 0.88)' : undefined,
+                            cursor: 'pointer',
+                            transition: 'all 0.25s ease'
+                          }}
+                          onClick={() => focusWaypointOnMap(sighting, idx)}
+                          title="Click card to focus on map"
+                        >
+                          <div className="card-top-meta" style={{ alignItems: 'center' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                              <span className="step-num" style={{ color: isLatest ? '#10b981' : 'var(--accent-cyan)' }}>
+                                WAYPOINT #{idx + 1}
+                              </span>
+                              {isLatest && (
+                                <span style={{ fontSize: '0.65rem', padding: '1px 6px', background: 'rgba(16, 185, 129, 0.2)', borderRadius: '3px', border: '1px solid #10b981', color: '#10b981', fontWeight: 800 }}>
+                                  CURRENT
+                                </span>
+                              )}
+                            </div>
 
-                        <div className="camera-title">{sighting.camera_name}</div>
-                        
-                        <div style={{ display: 'flex', gap: '0.4rem', marginBottom: '0.4rem', alignItems: 'center' }}>
-                          <span className={`badge-dept ${getDeptBadgeClass(sighting.department_name)}`}>
-                            {sighting.department_name || 'Police'}
-                          </span>
-                          <span className="badge-codec h264">{sighting.vendor_name || 'Hikvision'}</span>
-                          <span className="score-pill">Confidence: {Math.round(sighting.confidence_score * 100)}%</span>
-                        </div>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                              {/* Waypoint Redirection Map Icon Button */}
+                              <button
+                                className="btn-locate-map"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  focusWaypointOnMap(sighting, idx);
+                                }}
+                                title={`Redirect to Waypoint #${idx + 1} (${sighting.camera_name}) on Gujarat GIS Map`}
+                              >
+                                <span>🗺️</span>
+                                <span>Pan Map</span>
+                              </button>
+                              <span className="time-badge">{new Date(sighting.timestamp).toLocaleTimeString()}</span>
+                            </div>
+                          </div>
 
-                        {/* Inter-sighting transit physics */}
-                        {sighting.transit_distance_km && (
-                          <div className="transit-physics-box">
-                            <span>
-                              Transit: <strong>{sighting.transit_distance_km} km</strong> @ <strong>{sighting.transit_speed_kmh} km/h</strong>
+                          <div className="camera-title" style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginTop: '0.2rem' }}>
+                            <span>{sighting.camera_name}</span>
+                          </div>
+                          
+                          <div style={{ display: 'flex', gap: '0.4rem', marginBottom: '0.5rem', alignItems: 'center', flexWrap: 'wrap' }}>
+                            <span className={`badge-dept ${getDeptBadgeClass(sighting.department_name)}`}>
+                              {sighting.department_name || 'Police'}
                             </span>
-                            <span className={`transit-tag ${sighting.transit_plausibility?.includes('IMPLAUSIBLE') ? 'implausible' : sighting.transit_plausibility?.includes('FAST') ? 'fast' : 'plausible'}`}>
-                              {sighting.transit_plausibility}
+                            <span className="badge-codec h264">{sighting.vendor_name || 'Hikvision'}</span>
+                            <span className="score-pill">Match: {Math.round(sighting.confidence_score * 100)}%</span>
+                          </div>
+
+                          {/* ANPR Forensic Sighting Passport & GPS Telemetry (Clean, Accurate Forensic Record) */}
+                          <div className="waypoint-telemetry-box">
+                            <div className="telemetry-plate-strip">
+                              <div className="hsrp-mini-plate">
+                                <div className="hsrp-blue-band">
+                                  <span className="hsrp-ind">IND</span>
+                                </div>
+                                <span className="hsrp-plate-code">{sighting.plate_number}</span>
+                              </div>
+                              <div className="telemetry-status-tag">
+                                <span className="rec-dot" style={{ background: '#10b981', width: '6px', height: '6px' }}></span>
+                                <span>ANPR VERIFIED</span>
+                              </div>
+                            </div>
+
+                            <div className="telemetry-grid">
+                              <div className="telemetry-item">
+                                <span className="telemetry-label">📍 Geo-Coordinates</span>
+                                <span className="telemetry-val">
+                                  {sighting.latitude ? sighting.latitude.toFixed(4) : '23.0225'}°N, {sighting.longitude ? sighting.longitude.toFixed(4) : '72.5714'}°E
+                                </span>
+                              </div>
+                              <div className="telemetry-item">
+                                <span className="telemetry-label">📸 ANPR Optical Quality</span>
+                                <span className="telemetry-val" style={{ color: '#10b981' }}>
+                                  {Math.round(sighting.confidence_score * 100)}% Confirmed
+                                </span>
+                              </div>
+                            </div>
+                          </div>
+
+                          {/* Inter-sighting transit physics */}
+                          {sighting.transit_distance_km && (
+                            <div className="transit-physics-box" style={{ marginTop: '0.4rem' }}>
+                              <span>
+                                Transit: <strong>{sighting.transit_distance_km} km</strong> @ <strong>{sighting.transit_speed_kmh} km/h</strong>
+                              </span>
+                              <span className={`transit-tag ${sighting.transit_plausibility?.includes('IMPLAUSIBLE') ? 'implausible' : sighting.transit_plausibility?.includes('FAST') ? 'fast' : 'plausible'}`}>
+                                {sighting.transit_plausibility}
+                              </span>
+                            </div>
+                          )}
+
+                          <div className="evidence-sha" style={{ marginTop: '0.4rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                            <span>SHA-256: <code>{sighting.snapshot_sha256?.substring(0, 18)}...</code></span>
+                            <span style={{ color: 'var(--accent-cyan)', fontSize: '0.72rem', display: 'flex', alignItems: 'center', gap: '3px' }}>
+                              <span>📍 Pinpoint</span> &rarr;
                             </span>
                           </div>
-                        )}
-
-                        <div className="evidence-sha" style={{ marginTop: '0.4rem' }}>
-                          Evidence SHA-256: <code>{sighting.snapshot_sha256.substring(0, 20)}...</code>
                         </div>
-                      </div>
-                    ))
+                      );
+                    })
                   )}
                 </div>
 
@@ -1855,7 +2111,7 @@ export default function App() {
                   type="text"
                   className="input-police"
                   style={{ width: '220px' }}
-                  placeholder="Plate (e.g. GJ01AB1234)"
+                  placeholder="Plate (e.g. LS15EBC)"
                   value={newPlate}
                   onChange={(e) => setNewPlate(e.target.value)}
                 />
@@ -2011,9 +2267,56 @@ export default function App() {
 
             {/* Fleet Health Telemetry Table */}
             <div style={{ marginBottom: '1.5rem' }}>
-              <h3 style={{ fontSize: '1rem', fontFamily: 'var(--font-heading)', marginBottom: '0.8rem' }}>
-                📡 Live Fleet Nodes ({cameras.length} Active)
-              </h3>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.8rem', flexWrap: 'wrap', gap: '0.8rem' }}>
+                <h3 style={{ fontSize: '1rem', fontFamily: 'var(--font-heading)' }}>
+                  📡 Live Fleet Nodes ({cameras.length} Active Across Gujarat)
+                </h3>
+
+                {/* Vendor Summary Chips with Quick Decommission */}
+                <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', alignItems: 'center' }}>
+                  <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Registered Adapters:</span>
+                  {Array.from(new Set(cameras.map(c => c.vendor || 'Unknown'))).map(vendorName => {
+                    const count = cameras.filter(c => (c.vendor || 'Unknown') === vendorName).length;
+                    return (
+                      <span
+                        key={vendorName}
+                        style={{
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: '0.4rem',
+                          background: 'rgba(56, 189, 248, 0.1)',
+                          border: '1px solid rgba(56, 189, 248, 0.3)',
+                          padding: '0.2rem 0.6rem',
+                          borderRadius: '6px',
+                          fontSize: '0.75rem',
+                          color: '#e2e8f0'
+                        }}
+                      >
+                        <strong>{vendorName}</strong>
+                        <span style={{ color: 'var(--accent-cyan)', fontWeight: 700 }}>({count})</span>
+                        {cameras.length > 5 && (
+                          <button
+                            onClick={() => handleDecommissionVendor(vendorName)}
+                            title={`Decommission all ${count} nodes of vendor ${vendorName}`}
+                            style={{
+                              background: 'transparent',
+                              border: 'none',
+                              color: '#f87171',
+                              cursor: 'pointer',
+                              padding: '0 2px',
+                              fontSize: '0.8rem',
+                              lineHeight: 1
+                            }}
+                          >
+                            ✕
+                          </button>
+                        )}
+                      </span>
+                    );
+                  })}
+                </div>
+              </div>
+
               <table className="table-police glass-panel">
                 <thead>
                   <tr>
@@ -2024,6 +2327,7 @@ export default function App() {
                     <th>Resolution</th>
                     <th>Latency</th>
                     <th>Status</th>
+                    <th style={{ textAlign: 'center' }}>Action</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -2036,6 +2340,15 @@ export default function App() {
                       <td>{cam.resolution}</td>
                       <td style={{ color: '#10b981' }}>{cam.latency_ms || 22} ms</td>
                       <td><span className="cam-status-pill online">ONLINE</span></td>
+                      <td style={{ textAlign: 'center' }}>
+                        <button
+                          className="btn-decommission"
+                          title={`Decommission ${cam.name} from Gujarat network`}
+                          onClick={() => handleDeleteCamera(cam.id, cam.name)}
+                        >
+                          🗑️ Decommission
+                        </button>
+                      </td>
                     </tr>
                   ))}
                 </tbody>

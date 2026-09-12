@@ -3,7 +3,9 @@ import asyncio
 import datetime
 import math
 import logging
+import random
 from sqlalchemy.future import select
+from sqlalchemy.orm import selectinload
 
 from backend.core.config import settings
 from backend.core.database import AsyncSessionLocal
@@ -93,7 +95,9 @@ class CorrelationEngine:
 
         async with AsyncSessionLocal() as db:
             # 1. Resolve Camera Record
-            camera_result = await db.execute(select(Camera).where(Camera.name == camera_name))
+            camera_result = await db.execute(
+                select(Camera).options(selectinload(Camera.department)).where(Camera.name == camera_name)
+            )
             camera = camera_result.scalars().first()
             if not camera:
                 camera = Camera(
@@ -104,14 +108,13 @@ class CorrelationEngine:
                     geom_source="simulated"
                 )
                 db.add(camera)
-                await db.commit()
-                await db.refresh(camera)
+                await db.flush()
             else:
                 # Update coordinates if provided
                 if "latitude" in data and "longitude" in data:
                     camera.latitude = cam_lat
                     camera.longitude = cam_lon
-                    await db.commit()
+                    await db.flush()
 
             # 2. Log Sighting Record
             new_sighting = Sighting(
@@ -125,8 +128,7 @@ class CorrelationEngine:
                 timestamp=timestamp
             )
             db.add(new_sighting)
-            await db.commit()
-            await db.refresh(new_sighting)
+            await db.flush()
 
             # 3. Check Watchlist with Fuzzy Weighted Levenshtein Matching
             watchlist_res = await db.execute(select(Watchlist))
@@ -155,8 +157,7 @@ class CorrelationEngine:
                         updated_at=timestamp
                     )
                     db.add(incident)
-                    await db.commit()
-                    await db.refresh(incident)
+                    await db.flush()
 
                     alert_rec = Alert(
                         sighting_id=new_sighting.id,
@@ -167,8 +168,8 @@ class CorrelationEngine:
                         details=f"Matched watchlist item '{item.plate_number}' with distance {dist:.1f}. Reason: {item.reason}"
                     )
                     db.add(alert_rec)
+                    await db.flush()
                     await db.commit()
-                    await db.refresh(alert_rec)
 
                     alert_payload = {
                         "type": "watchlist_hit",
@@ -214,7 +215,9 @@ class CorrelationEngine:
             last_sighting = last_sighting_res.scalars().first()
 
             if last_sighting and last_sighting.camera_id != new_sighting.camera_id:
-                last_cam_res = await db.execute(select(Camera).where(Camera.id == last_sighting.camera_id))
+                last_cam_res = await db.execute(
+                    select(Camera).options(selectinload(Camera.department)).where(Camera.id == last_sighting.camera_id)
+                )
                 last_cam = last_cam_res.scalars().first()
                 if last_cam:
                     dt_seconds = abs((new_sighting.timestamp - last_sighting.timestamp).total_seconds())
@@ -241,8 +244,7 @@ class CorrelationEngine:
                             updated_at=timestamp
                         )
                         db.add(incident)
-                        await db.commit()
-                        await db.refresh(incident)
+                        await db.flush()
 
                         alert_rec = Alert(
                             sighting_id=new_sighting.id,
@@ -252,8 +254,8 @@ class CorrelationEngine:
                             details=f"Cloned plate anomaly: traveled {dist_km:.1f} km in {dt_seconds:.1f}s (~{speed_kmh:.0f} km/h) between {last_cam.name} and {camera.name}"
                         )
                         db.add(alert_rec)
+                        await db.flush()
                         await db.commit()
-                        await db.refresh(alert_rec)
 
                         travel_payload = {
                             "type": "impossible_travel",
